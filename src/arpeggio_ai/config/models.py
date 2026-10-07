@@ -1,13 +1,15 @@
 """Pydantic models for ``config.toml``.
 
 Single-field rules use Pydantic constraints and field validators. Rules that span fields
-(budget ordering, base_url per provider kind, references between providers, models and
-routes) run in ``model_validator(mode="after")`` hooks and report the exact field at fault.
+(budget rules per profile, base_url and api_key per provider, references between providers,
+models and routes) run in ``model_validator(mode="after")`` hooks and report the exact field
+at fault. The field reference lives in docs/05-ROUTING-AND-COST.md.
 """
 
 import re
 from collections.abc import Mapping
 from typing import Annotated, Any, Literal, Self
+from urllib.parse import urlsplit
 
 from pydantic import (
     BaseModel,
@@ -28,13 +30,24 @@ AdapterName = Literal["claude_code", "opencode", "command_code", "api"]
 ProviderKind = Literal["anthropic", "openai_compatible"]
 PrivacyClass = Literal["public", "private", "client"]
 BudgetProfile = Literal["free", "micro", "standard", "pro"]
+DataUse = Literal["no_training", "may_train", "unknown"]
 
 ProviderName = Annotated[str, StringConstraints(pattern=r"^[a-z][a-z0-9_-]*$")]
 ModelKey = Annotated[str, StringConstraints(pattern=r"^tier[1-3]\.[a-z0-9_-]+$")]
 
 API_KEY_REF = re.compile(r"(env|keychain):[A-Za-z_][A-Za-z0-9_.-]*")
 INLINE_KEY_MESSAGE = "inline API keys are not allowed; use env:VAR or keychain:NAME"
-HTTPS_URL = re.compile(r"https://\S+")
+DUPLICATE_PROVIDER_MESSAGE = (
+    "duplicate provider endpoint; multiple accounts for the same provider are not supported"
+)
+LOOPBACK_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
+
+_DAYS = ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
+_DAY = "|".join(_DAYS)
+_PEAK_WINDOW = re.compile(
+    rf"(?P<first>{_DAY})(?:-(?P<last>{_DAY}))? "
+    r"(?P<h1>\d\d):(?P<m1>\d\d)-(?P<h2>\d\d):(?P<m2>\d\d)"
+)
 
 Loc = tuple[str | int, ...]
 
@@ -42,6 +55,39 @@ Loc = tuple[str | int, ...]
 def is_key_reference(value: object) -> bool:
     """True if ``value`` is an ``env:VAR`` or ``keychain:NAME`` reference."""
     return isinstance(value, str) and API_KEY_REF.fullmatch(value) is not None
+
+
+def is_loopback_url(url: str | None) -> bool:
+    """True if ``url`` points at localhost, 127.0.0.1 or [::1]."""
+    if url is None:
+        return False
+    try:
+        return urlsplit(url).hostname in LOOPBACK_HOSTS
+    except ValueError:
+        return False
+
+
+def normalize_endpoint(url: str | None) -> str | None:
+    """Lowercase scheme and host, drop a trailing slash. Used to spot duplicate providers."""
+    if url is None:
+        return None
+    parts = urlsplit(url)
+    return f"{parts.scheme.lower()}://{parts.netloc.lower()}{parts.path.rstrip('/')}"
+
+
+def peak_window_problem(window: str) -> str | None:
+    """Why a ``peak_utc`` item such as ``"Mon-Fri 01:00-04:00"`` is invalid, or None."""
+    match = _PEAK_WINDOW.fullmatch(window)
+    if match is None:
+        return "must look like 'Mon-Fri 01:00-04:00' (days Mon to Sun, 24-hour UTC times)"
+    if match["last"] and _DAYS.index(match["last"]) <= _DAYS.index(match["first"]):
+        return "day range must go forward within one week, for example Mon-Fri"
+    h1, m1, h2, m2 = (int(match[group]) for group in ("h1", "m1", "h2", "m2"))
+    if h1 > 23 or m1 > 59 or m2 > 59 or h2 > 24 or (h2 == 24 and m2 != 0):
+        return "times must be between 00:00 and 23:59 (24:00 is allowed as an end time)"
+    if h1 * 60 + m1 >= h2 * 60 + m2:
+        return "start must be earlier than end (split windows that cross midnight)"
+    return None
 
 
 def _raise_if_any(title: str, problems: list[tuple[Loc, str]]) -> None:
@@ -107,32 +153,69 @@ class Budget(_Model):
         return self
 
 
+class PricingWindows(_Model):
+    """Peak windows in UTC. Model prices are peak prices; off-peak multiplies them."""
+
+    peak_utc: list[str] | None = None
+    offpeak_multiplier: float | None = Field(default=None, gt=0, le=1)
+
+    @model_validator(mode="after")
+    def _check_windows(self) -> Self:
+        problems: list[tuple[Loc, str]] = [
+            (("peak_utc", index), problem)
+            for index, window in enumerate(self.peak_utc or [])
+            if (problem := peak_window_problem(window)) is not None
+        ]
+        if self.peak_utc and self.offpeak_multiplier is None:
+            problems.append((("offpeak_multiplier",), "required when peak_utc is set"))
+        _raise_if_any("PricingWindows", problems)
+        return self
+
+
 class Provider(_Model):
     kind: ProviderKind
-    api_key: str
     base_url: str | None = None
+    api_key: str | None = None
+    gateway: bool = False
+    data_use: DataUse = "unknown"
+    pricing_windows: PricingWindows | None = None
 
     @field_validator("api_key")
     @classmethod
-    def _key_is_reference(cls, value: str) -> str:
+    def _key_is_reference(cls, value: str | None) -> str | None:
         # The rejected value must never reach an error message.
-        if not is_key_reference(value):
+        if value is not None and not is_key_reference(value):
             raise PydanticCustomError("inline_api_key", INLINE_KEY_MESSAGE)
         return value
 
     @field_validator("base_url")
     @classmethod
-    def _https_only(cls, value: str | None) -> str | None:
-        if value is not None and HTTPS_URL.fullmatch(value) is None:
-            raise PydanticCustomError("https_url", "must be a URL starting with https://")
-        return value
+    def _https_or_loopback(cls, value: str | None) -> str | None:
+        if value is None:
+            return value
+        try:
+            parts = urlsplit(value)
+            scheme, host = parts.scheme, parts.hostname
+        except ValueError:
+            scheme, host = "", None
+        allowed = scheme == "https" or (scheme == "http" and host in LOOPBACK_HOSTS)
+        if host and allowed and not any(char.isspace() for char in value):
+            return value
+        raise PydanticCustomError(
+            "https_url",
+            "must be an https:// URL (http:// only for localhost, 127.0.0.1 or [::1])",
+        )
 
     @model_validator(mode="after")
-    def _base_url_matches_kind(self) -> Self:
+    def _check_endpoint(self) -> Self:
+        problems: list[tuple[Loc, str]] = []
         if self.kind == "openai_compatible" and self.base_url is None:
-            _raise_if_any("Provider", [(("base_url",), "required when kind = 'openai_compatible'")])
-        if self.kind == "anthropic" and self.base_url is not None:
-            _raise_if_any("Provider", [(("base_url",), "not allowed when kind = 'anthropic'")])
+            problems.append((("base_url",), "required when kind = 'openai_compatible'"))
+        if self.api_key is None and not is_loopback_url(self.base_url):
+            problems.append(
+                (("api_key",), "required unless base_url is a loopback address (localhost)")
+            )
+        _raise_if_any("Provider", problems)
         return self
 
 
@@ -204,6 +287,13 @@ class Config(_Model):
                     f" (allowed: {allowed})",
                 )
             )
+
+        endpoints: set[tuple[str, str | None]] = set()
+        for name, provider in self.providers.items():
+            endpoint = (provider.kind, normalize_endpoint(provider.base_url))
+            if endpoint in endpoints:
+                problems.append((("providers", name), DUPLICATE_PROVIDER_MESSAGE))
+            endpoints.add(endpoint)
 
         for index, name in enumerate(self.repo.provider_allow or []):
             if name not in self.providers:

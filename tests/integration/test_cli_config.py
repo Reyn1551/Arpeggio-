@@ -215,6 +215,8 @@ def test_show_json_is_the_effective_config(
     assert config["providers"]["anthropic"] == {
         "kind": "anthropic",
         "api_key": "env:ANTHROPIC_API_KEY",
+        "gateway": False,
+        "data_use": "unknown",
     }
     assert config["repo"] == {"privacy_class": "client"}
     assert parse_config(config).budget.per_task_usd == 1.5

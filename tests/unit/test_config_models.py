@@ -366,19 +366,174 @@ def test_base_url_required_for_openai_compatible(config_data: dict[str, Any]) ->
     }
 
 
-def test_base_url_forbidden_for_anthropic(config_data: dict[str, Any]) -> None:
-    config_data["providers"]["anthropic"]["base_url"] = "https://api.anthropic.com"
-    assert fields(config_data) == {
-        "providers.anthropic.base_url": "not allowed when kind = 'anthropic'"
-    }
+def test_base_url_allowed_for_anthropic_format_endpoints(config_data: dict[str, Any]) -> None:
+    config_data["providers"]["anthropic"]["base_url"] = "https://api.deepseek.com/anthropic"
+    config = parse_config(config_data)
+    assert config.providers["anthropic"].base_url == "https://api.deepseek.com/anthropic"
 
 
-@pytest.mark.parametrize("url", ["http://api.deepseek.com", "api.deepseek.com", "https://", ""])
-def test_base_url_must_be_https(config_data: dict[str, Any], url: str) -> None:
+HTTPS_MESSAGE = "must be an https:// URL (http:// only for localhost, 127.0.0.1 or [::1])"
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "http://api.deepseek.com",
+        "http://192.168.1.10:11434/v1",
+        "http://localhost.example.com",
+        "ftp://localhost",
+        "api.deepseek.com",
+        "https://",
+        "",
+        "https://api.deepseek .com",
+        "http://[::1",
+    ],
+)
+def test_base_url_must_be_https_or_loopback_http(config_data: dict[str, Any], url: str) -> None:
     config_data["providers"]["deepseek"]["base_url"] = url
+    assert fields(config_data) == {"providers.deepseek.base_url": HTTPS_MESSAGE}
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "http://localhost:11434/v1",
+        "http://127.0.0.1:4000",
+        "http://[::1]:8080/v1",
+        "HTTP://LOCALHOST",
+    ],
+)
+def test_loopback_http_is_accepted_without_api_key(config_data: dict[str, Any], url: str) -> None:
+    config_data["providers"]["local"] = {"kind": "openai_compatible", "base_url": url}
+    provider = parse_config(config_data).providers["local"]
+    assert (provider.base_url, provider.api_key) == (url, None)
+
+
+@pytest.mark.parametrize("url", ["https://api.groq.com/openai/v1", None])
+def test_api_key_required_for_non_loopback(config_data: dict[str, Any], url: str | None) -> None:
+    provider: dict[str, Any] = {"kind": "openai_compatible" if url else "anthropic"}
+    if url:
+        provider["base_url"] = url
+    config_data["providers"] = {"only": provider}
+    for spec in config_data["models"].values():
+        spec["provider"] = "only"
     assert fields(config_data) == {
-        "providers.deepseek.base_url": "must be a URL starting with https://"
+        "providers.only.api_key": "required unless base_url is a loopback address (localhost)"
     }
+
+
+# Provider gateway, data_use and pricing windows (CFG-05, CFG-07)
+
+
+def test_provider_defaults(config_data: dict[str, Any]) -> None:
+    provider = parse_config(config_data).providers["deepseek"]
+    assert (provider.gateway, provider.data_use, provider.pricing_windows) == (
+        False,
+        "unknown",
+        None,
+    )
+
+
+@pytest.mark.parametrize("data_use", ["no_training", "may_train", "unknown"])
+def test_data_use_values(config_data: dict[str, Any], data_use: str) -> None:
+    config_data["providers"]["deepseek"].update(data_use=data_use, gateway=True)
+    provider = parse_config(config_data).providers["deepseek"]
+    assert (provider.data_use, provider.gateway) == (data_use, True)
+
+
+def test_unknown_data_use_is_rejected(config_data: dict[str, Any]) -> None:
+    config_data["providers"]["deepseek"]["data_use"] = "never"
+    assert "providers.deepseek.data_use" in fields(config_data)
+
+
+def test_pricing_windows_round_trip(config_data: dict[str, Any]) -> None:
+    windows = {
+        "peak_utc": ["Mon-Fri 01:00-04:00", "Mon-Fri 06:00-10:00", "Sat 20:00-24:00"],
+        "offpeak_multiplier": 0.5,
+    }
+    config_data["providers"]["deepseek"]["pricing_windows"] = windows
+    parsed = parse_config(config_data).providers["deepseek"].pricing_windows
+    assert parsed is not None
+    assert (parsed.peak_utc, parsed.offpeak_multiplier) == (windows["peak_utc"], 0.5)
+
+
+@pytest.mark.parametrize(
+    ("window", "message"),
+    [
+        ("Mon-Fri 1:00-4:00", "must look like"),
+        ("Monday 01:00-04:00", "must look like"),
+        ("mon-fri 01:00-04:00", "must look like"),
+        ("Mon-Fri 01:00-04:00 UTC", "must look like"),
+        ("Fri-Mon 01:00-04:00", "day range must go forward"),
+        ("Mon-Mon 01:00-04:00", "day range must go forward"),
+        ("Mon 24:00-24:00", "times must be between"),
+        ("Mon 10:60-11:00", "times must be between"),
+        ("Mon 23:00-24:30", "times must be between"),
+        ("Mon 04:00-01:00", "start must be earlier than end"),
+        ("Mon 04:00-04:00", "start must be earlier than end"),
+    ],
+)
+def test_bad_peak_windows_are_rejected(
+    config_data: dict[str, Any], window: str, message: str
+) -> None:
+    config_data["providers"]["deepseek"]["pricing_windows"] = {
+        "peak_utc": ["Mon-Fri 01:00-04:00", window],
+        "offpeak_multiplier": 0.5,
+    }
+    found = fields(config_data)
+    assert list(found) == ["providers.deepseek.pricing_windows.peak_utc.1"]
+    assert message in found["providers.deepseek.pricing_windows.peak_utc.1"]
+
+
+def test_offpeak_multiplier_required_with_windows(config_data: dict[str, Any]) -> None:
+    config_data["providers"]["deepseek"]["pricing_windows"] = {"peak_utc": ["Mon 01:00-02:00"]}
+    assert fields(config_data) == {
+        "providers.deepseek.pricing_windows.offpeak_multiplier": "required when peak_utc is set"
+    }
+
+
+@pytest.mark.parametrize("multiplier", [0, 1.5, -0.5])
+def test_offpeak_multiplier_range(config_data: dict[str, Any], multiplier: float) -> None:
+    config_data["providers"]["deepseek"]["pricing_windows"] = {
+        "peak_utc": ["Mon 01:00-02:00"],
+        "offpeak_multiplier": multiplier,
+    }
+    assert "providers.deepseek.pricing_windows.offpeak_multiplier" in fields(config_data)
+
+
+# Duplicate providers (QTA-04)
+
+
+DUPLICATE = "duplicate provider endpoint; multiple accounts for the same provider are not supported"
+
+
+@pytest.mark.parametrize(
+    "url",
+    ["https://api.deepseek.com", "https://api.deepseek.com/", "HTTPS://API.DeepSeek.com"],
+)
+def test_duplicate_provider_endpoint_is_rejected(config_data: dict[str, Any], url: str) -> None:
+    config_data["providers"]["deepseek2"] = {
+        "kind": "openai_compatible",
+        "base_url": url,
+        "api_key": "env:SECOND_DEEPSEEK_KEY",
+    }
+    assert fields(config_data) == {"providers.deepseek2": DUPLICATE}
+
+
+def test_two_anthropic_providers_without_base_url_are_duplicates(
+    config_data: dict[str, Any],
+) -> None:
+    config_data["providers"]["anthropic2"] = {"kind": "anthropic", "api_key": "env:OTHER"}
+    assert fields(config_data) == {"providers.anthropic2": DUPLICATE}
+
+
+def test_same_url_with_different_kind_is_not_a_duplicate(config_data: dict[str, Any]) -> None:
+    config_data["providers"]["deepseek_anthropic"] = {
+        "kind": "anthropic",
+        "base_url": "https://api.deepseek.com",
+        "api_key": "env:DEEPSEEK_API_KEY",
+    }
+    assert "deepseek_anthropic" in parse_config(config_data).providers
 
 
 # Names and kinds
