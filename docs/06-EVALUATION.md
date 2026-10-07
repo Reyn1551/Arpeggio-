@@ -117,7 +117,7 @@ Every proposal (policy, taste, skill, prompt, router weights) and every change t
 4. Pass → proposal status `accepted`, merged with the eval run ID in the commit message.
 5. Fail → `rejected`, with the report attached so the reflector can learn from it.
 
-Gate runs cost money. Budget them explicitly (a planned `eval_per_month_usd` budget field, not in the config schema yet) and run them through batch APIs where possible.
+Gate runs cost money. Budget them explicitly (an `eval_per_month_usd` budget field, planned for M0.6 and not in the config schema yet) and run them through batch APIs where possible.
 
 ## Anti-gaming rules
 
