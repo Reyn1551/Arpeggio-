@@ -184,14 +184,16 @@ arpeggio/
 │   │   └── templates/
 │   │       └── config.example.toml    # providers, tiers, prices, budgets (written by `arpeggio init`)
 │   ├── cli/                       # Typer app, output helpers, commands/
-│   ├── core/                      # errors.py now, later task, attempt, lifecycle state machine, orchestrator
+│   ├── core/                      # errors.py, ids.py (ULID), clock.py (UTC timestamps), logs.py (JSON lines),
+│   │                              #   later task, attempt, lifecycle state machine, orchestrator
 │   ├── intake/                    # criteria derivation, clarification, splitting
 │   ├── routing/                   # risk.py, policy.py, bandit.py (v2), fallback.py
 │   ├── cost/                      # governor.py, pricing.py, budget.py, loops.py, context_diet.py
 │   ├── adapters/                  # base.py, registry.py, claude_code.py, api.py, opencode.py, command_code.py
 │   ├── verify/                    # runner.py, reviewer.py, depth.py
 │   ├── safety/                    # approvals.py, secrets.py, worktree.py, sandbox.py
-│   ├── store/                     # db.py, repositories, migrations/*.sql
+│   ├── store/                     # db.py (connection, migrations), repositories.py, artifacts.py,
+│   │                              #   migrations/0001_initial.sql
 │   ├── learning/                  # reflector.py, taste.py, skills.py, export.py (v2)
 │   ├── evals/                     # loader, runner, strategies, report
 │   ├── mcp/                       # MCP server (v2)
@@ -217,10 +219,10 @@ The example config lives at `src/arpeggio_ai/config/templates/config.example.tom
 | `~/.arpeggio/worktrees/<attempt>/` | Isolated worktrees (cleaned after merge/reject) |
 | `~/.arpeggio/taste/` | Vendor-neutral taste rules (git repo) |
 | `~/.arpeggio/skills/` | Reusable skills (git repo) |
-| `~/.arpeggio/logs/` | Structured JSON logs (OBS-03) |
+| `~/.arpeggio/logs/YYYY-MM-DD.jsonl` | Structured logs, one JSON object per line and one file per UTC day (OBS-03) |
 | `<repo>/.arpeggio/config.toml` | Per-repo overrides, deep-merged over the global config. The only file allowed a `[repo]` table (privacy class, provider allowlist). Checks are planned. |
 
-`~/.arpeggio` is the default home. Set `ARPEGGIO_HOME` to use another directory. `arpeggio init` creates the home and its `artifacts/`, `worktrees/`, `taste/`, `skills/` and `logs/` subdirectories with mode `0700` on POSIX.
+`~/.arpeggio` is the default home. Set `ARPEGGIO_HOME` to use another directory. `arpeggio init` creates the home and its `artifacts/`, `worktrees/`, `taste/`, `skills/` and `logs/` subdirectories with mode `0700` on POSIX, then creates or migrates `arpeggio.db`.
 
 ## Key design decisions
 

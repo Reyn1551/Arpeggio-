@@ -28,6 +28,10 @@ class ConfigIssue:
         return f"{where}: {self.message}"
 
 
+class StoreError(ArpeggioError):
+    """The database or artifact store cannot be used as asked."""
+
+
 class ConfigError(ArpeggioError):
     """Config is missing, unreadable, or invalid. Carries every issue found."""
 

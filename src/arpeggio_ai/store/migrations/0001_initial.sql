@@ -1,37 +1,5 @@
-# 04 — Data Model
-
-Everything Arpeggio knows lives in one SQLite database (`~/.arpeggio/arpeggio.db`, WAL mode). Every feature — routing, learning, dashboard, evals — is a different read over the same tables. Get this schema right before writing feature code.
-
-## Entity overview
-
-```mermaid
-erDiagram
-    REPOS ||--o{ TASKS : contains
-    TASKS ||--o{ DONE_CRITERIA : has
-    TASKS ||--o{ ATTEMPTS : has
-    TASKS ||--o{ TASKS : "parent of"
-    ATTEMPTS ||--o{ STEPS : has
-    ATTEMPTS ||--o{ VERDICTS : has
-    ATTEMPTS ||--o{ APPROVALS : requests
-    TASKS ||--o| FEEDBACK : receives
-    PROPOSALS }o--o{ EVAL_RUNS : "gated by"
-    EVAL_RUNS ||--o{ EVAL_RESULTS : has
-```
-
-## Conventions
-
-- IDs are ULIDs stored as `TEXT` (sortable by time, safe to generate offline).
-- Timestamps are ISO-8601 UTC `TEXT` in the fixed-width form `YYYY-MM-DDTHH:MM:SS.mmmZ`, so text order equals time order. SQLite's `datetime('now')` uses a space instead of `T`, so views must compare against `strftime('%Y-%m-%dT%H:%M:%fZ', ...)`.
-- Money is `REAL` in USD with prices snapshotted at call time; never recompute historical cost from current prices.
-- JSON columns are `TEXT` validated by the application.
-- Large blobs (full tool outputs, diffs, logs) go to `~/.arpeggio/artifacts/`; the DB stores a relative path.
-- Rows are append-mostly. Status changes update a row; history of decisions is never deleted.
-
-## Schema (v1)
-
-```sql
-PRAGMA journal_mode = WAL;
-PRAGMA foreign_keys = ON;
+-- Schema v1, copied from docs/04-DATA-MODEL.md.
+-- PRAGMAs (foreign_keys, journal_mode) are set per connection in store/db.py.
 
 CREATE TABLE repos (
     id              TEXT PRIMARY KEY,
@@ -195,44 +163,3 @@ CREATE TABLE schema_version (
     version     INTEGER PRIMARY KEY,
     applied_at  TEXT NOT NULL
 );
-```
-
-## Implementation notes
-
-- The schema above ships as `src/arpeggio_ai/store/migrations/0001_initial.sql`, minus the two PRAGMAs. `store/db.py` sets those on every connection: `foreign_keys` only lasts for one connection, and `journal_mode` cannot change inside a transaction.
-- `open_db` applies pending migrations in order, each in its own `BEGIN IMMEDIATE` transaction, and refuses a database whose `schema_version` is newer than the code. A schema change means a new numbered file there plus an update to this document.
-- Status columns have no SQL `CHECK`. The repository layer (`store/repositories.py`) checks them against Python `Literal` types, because changing a `CHECK` in SQLite means rebuilding the table.
-- The token and cost totals on `attempts` are the one exception to the rule below. Each step updates them in the same transaction that inserts the step, because live cost is needed while the attempt runs (CLI-02, CST-03). A test keeps them equal to `SUM` over `steps`.
-- Repositories exist for `repos`, `tasks`, `attempts` and `steps`. The other tables get theirs in the milestone that first writes them.
-- The views below are not created yet. They arrive as a migration together with the first feature that reads them (baseline report in M0.6, dashboard in M1.9).
-
-## Derived metrics (as SQL views)
-
-Metrics are computed from data, never stored as mutable counters.
-
-```sql
--- Cost per solved task, user tasks only, last 30 days
-CREATE VIEW v_cost_per_solved_30d AS
-SELECT
-    t.category,
-    COUNT(*) FILTER (WHERE t.status = 'merged')                    AS solved,
-    SUM(a.cost_usd) + COALESCE(SUM(v.cost_usd), 0)                 AS total_cost,
-    (SUM(a.cost_usd) + COALESCE(SUM(v.cost_usd), 0))
-        / NULLIF(COUNT(DISTINCT t.id) FILTER (WHERE t.status = 'merged'), 0) AS cost_per_solved
-FROM tasks t
-JOIN attempts a       ON a.task_id = t.id
-LEFT JOIN verdicts v  ON v.attempt_id = a.id
-WHERE t.source = 'user'
-  AND t.created_at >= datetime('now', '-30 days')
-GROUP BY t.category;
-```
-
-> Note: the join above double-counts when an attempt has several verdicts. The real implementation must aggregate attempts and verdicts in separate subqueries before joining. This is a known trap; cover it with a test.
-
-Other views to implement: `v_success_rate`, `v_escape_rate`, `v_route_stats` (per category × route: n, successes, mean cost — the bandit's input), `v_daily_spend`, `v_counterfactual_savings`.
-
-## Retention
-
-- DB rows: kept forever (they are the learning data).
-- Artifacts: full payloads older than 90 days MAY be compressed; never deleted for tasks referenced by eval runs or proposals.
-- Worktrees: removed after merge, reject, or cancel.
