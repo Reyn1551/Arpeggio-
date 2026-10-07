@@ -9,7 +9,14 @@ import pytest
 from pydantic import BaseModel
 
 from arpeggio_ai.config.loader import TEMPLATES, template_bytes
-from arpeggio_ai.config.models import Budget, ModelSpec, PricingWindows, Provider, RepoSettings
+from arpeggio_ai.config.models import (
+    Budget,
+    ModelSpec,
+    PricingWindows,
+    PrivacySettings,
+    Provider,
+    RepoSettings,
+)
 
 ROOT = Path(__file__).parents[2]
 DOCS = ROOT / "docs"
@@ -99,6 +106,7 @@ def reference_fields(heading: str) -> set[str]:
         ("[providers.<name>]", Provider),
         ('[models."tier<N>.<name>"]', ModelSpec),
         ("[repo]", RepoSettings),
+        ("[privacy]", PrivacySettings),
     ],
 )
 def test_config_reference_matches_the_models(heading: str, model: type[BaseModel]) -> None:

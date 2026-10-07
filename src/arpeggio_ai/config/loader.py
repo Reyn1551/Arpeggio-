@@ -117,6 +117,15 @@ def load_config(repo: Path | None = None) -> Config:
             )
         elif repo_path.exists():
             repo_raw = _read_into(repo_path, issues)
+            if repo_raw is not None and "privacy" in repo_raw:
+                issues.append(
+                    ConfigIssue(
+                        file=str(repo_path),
+                        field="privacy",
+                        message="[privacy] is only allowed in the global config. "
+                        "Use allow_training_providers under [repo] instead.",
+                    )
+                )
 
     if issues or global_raw is None:
         raise ConfigError(issues)

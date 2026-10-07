@@ -240,7 +240,7 @@ Gateways (OpenRouter, 9Router, LiteLLM and similar) and local servers are config
 
 - Set `gateway = true` on gateways. Every call records the model that actually answered. A mismatch with the requested model, after `response_model_aliases`, is flagged, and that attempt is kept out of router learning (RTE-11, CFG-10).
 - Turn off gateway-side fallback, or pin the model. Arpeggio never relies on it for learning data.
-- Every provider declares `data_use`. `private` and `client` repos only use providers marked `no_training`, unless the repo sets `allow_training_providers = true` (SAF-07). A gateway is a provider of its own for this check, and the stricter of gateway and upstream applies (SAF-08).
+- Every provider declares `data_use`. `private` and `client` repos only use providers marked `no_training` unless they opt in (SAF-07). A private repo opts in with `allow_training_providers` under `[repo]`, or follows the global `[privacy]` value when it leaves that unset. A client repo needs an explicit repo-level `true` and ignores the global value. A gateway is a provider of its own for this check, and the stricter of gateway and upstream applies (SAF-08).
 
 What Arpeggio will not do:
 
@@ -301,13 +301,19 @@ The key is `tier1`, `tier2` or `tier3`, a dot, then lowercase letters, digits, `
 
 `counterfactual_route = { adapter, model, effort }`. `adapter` is `claude_code`, `opencode`, `command_code` or `api`. `model` must be a model key above, and `effort` must be one of that model's `efforts`.
 
+### `[privacy]` (only in the global config)
+
+| Field | Type | Rule |
+|---|---|---|
+| `allow_training_providers` | bool | Default `false`. The opt-in that `private` repos follow when their own `[repo]` value is unset. `client` repos ignore it (SAF-07) |
+
 ### `[repo]` (only in `<repo>/.arpeggio/config.toml`)
 
 | Field | Type | Rule |
 |---|---|---|
 | `privacy_class` | string | `public`, `private` (default) or `client` |
 | `provider_allow` | list | Optional. Every name must be a provider above |
-| `allow_training_providers` | bool | Default `false`. `true` lets this repo use providers whose `data_use` is `may_train` or `unknown` (SAF-07) |
+| `allow_training_providers` | bool | Optional. `true` lets this repo use providers whose `data_use` is `may_train` or `unknown`, `false` forbids it even if the global value is `true`. Unset means the global `[privacy]` value for `private` repos and `false` for `client` repos (SAF-07) |
 
 ## Learned router (v2): contextual bandit
 

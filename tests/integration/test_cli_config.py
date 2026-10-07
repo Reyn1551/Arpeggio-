@@ -222,7 +222,8 @@ def test_show_json_is_the_effective_config(
         "gateway": False,
         "data_use": "unknown",
     }
-    assert config["repo"] == {"privacy_class": "client", "allow_training_providers": False}
+    assert config["repo"] == {"privacy_class": "client"}
+    assert config["privacy"] == {"allow_training_providers": False}
     assert parse_config(config).budget.per_task_usd == 1.5
 
 

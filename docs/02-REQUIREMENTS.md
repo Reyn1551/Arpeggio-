@@ -105,7 +105,7 @@
 | SAF-04 | P0 | Content from web pages, issues, READMEs, and tool outputs MUST be treated as data. Instructions found there are not executed without user confirmation. | Prompt-injection eval tasks do not trigger the injected action. |
 | SAF-05 | P0 | Every approval request and decision MUST be logged with timestamp and actor. | `approvals` rows exist for every gated action. |
 | SAF-06 | P0 | Each repo MUST support a provider allowlist and a privacy class (`public`, `private`, `client`). | `client` repos only route to allowlisted providers. |
-| SAF-07 | P0 | Repos with privacy class `private` or `client` MUST NOT route to providers whose `data_use` is `may_train` or `unknown`, unless the repo config sets `allow_training_providers = true`. | Routing test for each class. |
+| SAF-07 | P0 | Repos with privacy class `private` or `client` MUST NOT route to providers whose `data_use` is `may_train` or `unknown`, unless they opt in. A `private` repo opts in with `[repo] allow_training_providers = true`, or, when the repo leaves it unset, through the global `[privacy] allow_training_providers = true`. A `client` repo ignores the global value and opts in only with an explicit repo-level `true`. | Routing test for each class, with the global value on and off and the repo value unset, true and false. A `client` repo never follows the global value. |
 | SAF-08 | P0 | A gateway is a separate provider for privacy purposes, with its own `data_use`. The strictest of gateway and upstream applies when the upstream is known. | Test that gateway `data_use` is enforced. |
 
 ### Storage & observability (OBS)

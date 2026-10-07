@@ -270,3 +270,22 @@ def test_global_and_repo_problems_are_reported_together(
         (str(global_path), "repo"),
         (str(repo_path), None),
     ]
+
+
+def test_privacy_table_is_global_only(
+    write_global: WriteFile, write_repo: WriteFile, template_text: str, repo_dir: Path
+) -> None:
+    write_global(template_text + "\n[privacy]\nallow_training_providers = true\n")
+    assert load_config().privacy.allow_training_providers is True
+    path = write_repo("[privacy]\nallow_training_providers = true\n")
+    issues = load_issues(repo_dir)
+    assert [(issue.file, issue.field) for issue in issues] == [(str(path), "privacy")]
+    assert issues[0].message.startswith("[privacy] is only allowed in the global config.")
+
+
+def test_repo_opt_in_overrides_global(
+    write_global: WriteFile, write_repo: WriteFile, template_text: str, repo_dir: Path
+) -> None:
+    write_global(template_text + "\n[privacy]\nallow_training_providers = true\n")
+    write_repo("[repo]\nallow_training_providers = false\n")
+    assert load_config(repo_dir).allows_training_providers() is False
