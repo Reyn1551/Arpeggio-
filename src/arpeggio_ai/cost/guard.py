@@ -5,9 +5,10 @@ Checks, in order:
 1. The model's provider id is still a template placeholder such as ``<free-model-id>``.
 2. Under the ``free`` profile the model is neither ``free = true`` nor on a loopback
    provider (BUD-02).
-3. The worst case for this call (estimated prompt tokens, no cache hits, ``max_tokens``
-   output, at the current price window) is more than what is left of ``per_task_usd``
-   after ``spent_usd``. Budgets across attempts, days and months are M1.4 (CST-03).
+3. The worst case for this call (prompt tokens estimated as ``ceil(chars / 2)``, no cache
+   hits, ``max_tokens`` output, at the current price window) is more than what is left of
+   ``per_task_usd`` after ``spent_usd``. Budgets across attempts, days and months are
+   M1.4 (CST-03).
 
 A refusal raises ``SpendRefused`` and no request is sent.
 """
@@ -27,6 +28,9 @@ from arpeggio_ai.cost.pricing import (
 )
 
 _PLACEHOLDER = re.compile(r"<.*>")
+# Conservative on purpose: recorded estimates use 4 characters per token, the guard uses 2,
+# so code or non-Latin prompts are not underestimated before money is spent.
+GUARD_CHARS_PER_TOKEN = 2
 
 
 def check_call(
@@ -49,7 +53,9 @@ def check_call(
         raise ValueError("max_tokens must be >= 1")
 
     price = snapshot(spec, provider, at)
-    worst = round_usd(compute_cost(price, estimate_tokens(prompt_chars), 0, max_tokens))
+    worst = round_usd(
+        compute_cost(price, estimate_tokens(prompt_chars, GUARD_CHARS_PER_TOKEN), 0, max_tokens)
+    )
     left = Decimal(repr(config.budget.per_task_usd)) - Decimal(repr(spent_usd))
     if Decimal(repr(worst)) > left:
         raise SpendRefused(

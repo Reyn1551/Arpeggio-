@@ -127,9 +127,13 @@ def round_usd(cost: Decimal) -> float:
     return float(cost.quantize(_USD_PLACES, rounding=ROUND_HALF_EVEN))
 
 
-def estimate_tokens(chars: int) -> int:
-    """Rough token count for text of ``chars`` characters: ``ceil(chars / 4)``."""
-    return math.ceil(max(chars, 0) / CHARS_PER_TOKEN)
+def estimate_tokens(chars: int, chars_per_token: int = CHARS_PER_TOKEN) -> int:
+    """Rough token count for text of ``chars`` characters: ``ceil(chars / chars_per_token)``.
+
+    The default of 4 is used to record estimated costs. The spend guard passes 2 to stay on
+    the safe side for code and non-Latin text, which pack fewer characters per token.
+    """
+    return math.ceil(max(chars, 0) / chars_per_token)
 
 
 def _count(value: Any) -> int | None:

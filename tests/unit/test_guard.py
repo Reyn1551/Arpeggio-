@@ -137,7 +137,7 @@ def test_offpeak_window_halves_the_worst_case(micro: Config) -> None:
 
 
 def test_prompt_counts_toward_the_worst_case(micro: Config) -> None:
-    # 1M chars -> 250k tokens at $1.32/M = $0.33, over the $0.20 budget on its own.
+    # 1M chars -> 500k guard tokens at $1.32/M = $0.66, over the $0.20 budget on its own.
     with pytest.raises(SpendRefused):
         check(micro, "tier3.pro", prompt_chars=1_000_000, max_tokens=1)
 
@@ -151,3 +151,13 @@ def test_earlier_spend_shrinks_what_is_left(micro: Config) -> None:
 def test_max_tokens_must_be_positive(micro: Config) -> None:
     with pytest.raises(ValueError, match="max_tokens"):
         check(micro, "tier3.pro", max_tokens=0)
+
+
+def test_guard_counts_two_characters_per_prompt_token(micro: Config) -> None:
+    # tier3.pro peak: 4 prompt tokens at $1.32/M plus 1 output token at $3.96/M = $0.00000924.
+    budget = micro.budget.model_copy(update={"per_task_usd": 0.00000924})
+    config = micro.model_copy(update={"budget": budget})
+    check(config, "tier3.pro", prompt_chars=8, max_tokens=1)  # ceil(8 / 2) = 4 tokens
+    # ceil(9 / 2) = 5 tokens. The recording estimate, ceil(9 / 4) = 3, would have passed.
+    with pytest.raises(SpendRefused, match=r"worst-case cost \$0\.00001056"):
+        check(config, "tier3.pro", prompt_chars=9, max_tokens=1)

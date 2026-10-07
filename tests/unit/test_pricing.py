@@ -264,6 +264,11 @@ def test_estimate_tokens(chars: int, expected: int) -> None:
     assert estimate_tokens(chars) == expected
 
 
+@pytest.mark.parametrize(("chars", "expected"), [(0, 0), (1, 1), (2, 1), (3, 2), (400, 200)])
+def test_estimate_tokens_at_two_chars_per_token(chars: int, expected: int) -> None:
+    assert estimate_tokens(chars, 2) == expected
+
+
 def test_deepseek_usage() -> None:
     usage = {
         "prompt_tokens": 120,

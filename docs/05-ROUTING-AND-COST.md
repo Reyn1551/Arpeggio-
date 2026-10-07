@@ -217,7 +217,7 @@ Before every request (`cost/guard.py`):
 
 1. A model whose provider id is still a template placeholder (`<...>`) is refused: "model <key> still has a placeholder id; edit your config".
 2. Under the `free` profile, a model that is neither `free = true` nor on a loopback provider is refused (BUD-02).
-3. The worst case for the call (estimated prompt tokens, no cache hits, `max_tokens` output, at the current window) must not exceed `per_task_usd` minus what the attempt has spent so far. Equal is allowed.
+3. The worst case for the call (prompt tokens, no cache hits, `max_tokens` output, at the current window) must not exceed `per_task_usd` minus what the attempt has spent so far. Equal is allowed. Here the prompt is estimated as `ceil(characters / 2)` tokens, twice the recording estimate below, so code and non-Latin text are not underestimated before money is spent. Estimated costs recorded for a call without usage still use `ceil(characters / 4)`.
 
 A refused call sends nothing. It is recorded as a `message` step with cost 0, and the attempt pauses. Budgets across tasks, days and months (CST-03) and the prepaid balance check (BUD-03) come later, in M1.4 and M1.11.
 

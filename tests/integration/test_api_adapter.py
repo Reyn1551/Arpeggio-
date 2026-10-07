@@ -474,8 +474,9 @@ def test_paid_model_under_free_profile_is_refused(harness: Harness) -> None:
 def test_worst_case_over_budget_is_refused(harness: Harness) -> None:
     run = harness.run(FakeProvider(), model="tier3.pro", effort="high", max_tokens=1_000_000)
     refused(run)
-    # 3 prompt tokens at $1.32/M plus 1M output tokens at $3.96/M.
-    assert "worst-case cost $3.96000396" in run.steps[0].summary
+    # "Say hello." is 10 chars, so the guard counts ceil(10 / 2) = 5 prompt tokens at $1.32/M,
+    # plus 1M output tokens at $3.96/M.
+    assert "worst-case cost $3.96000660" in run.steps[0].summary
 
 
 def test_second_turn_refused_after_first_turn_spend(harness: Harness) -> None:
