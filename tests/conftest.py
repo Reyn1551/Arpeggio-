@@ -1,4 +1,5 @@
 import tomllib
+from collections.abc import Callable
 from importlib.resources import files
 from pathlib import Path
 from typing import Any
@@ -32,3 +33,29 @@ def repo_dir(tmp_path: Path) -> Path:
     path = tmp_path / "repo"
     path.mkdir()
     return path
+
+
+@pytest.fixture
+def write_global(home: Path) -> Callable[[str], Path]:
+    """Write text to <home>/config.toml and return its path."""
+
+    def write(text: str) -> Path:
+        home.mkdir(parents=True, exist_ok=True)
+        path = home / "config.toml"
+        path.write_text(text, encoding="utf-8")
+        return path
+
+    return write
+
+
+@pytest.fixture
+def write_repo(repo_dir: Path) -> Callable[[str], Path]:
+    """Write text to <repo>/.arpeggio/config.toml and return its path."""
+
+    def write(text: str) -> Path:
+        path = repo_dir / ".arpeggio" / "config.toml"
+        path.parent.mkdir(exist_ok=True)
+        path.write_text(text, encoding="utf-8")
+        return path
+
+    return write
