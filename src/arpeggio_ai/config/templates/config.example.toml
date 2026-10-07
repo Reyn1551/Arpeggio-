@@ -1,0 +1,70 @@
+# Arpeggio global config.
+#
+# `arpeggio init` copies this file to ~/.arpeggio/config.toml, or to
+# $ARPEGGIO_HOME/config.toml when that variable is set. Check your edits with
+# `arpeggio config validate`.
+#
+# A repo can override any value here in <repo>/.arpeggio/config.toml. Tables merge
+# key by key. Arrays and single values from the repo file replace the global ones.
+
+# Spending limits in USD. per_day_usd must be at least per_task_usd, and
+# per_month_usd at least per_day_usd.
+[budget]
+per_task_usd   = 2.00
+per_day_usd    = 10.00
+per_month_usd  = 150.00
+overhead_alert = 0.10        # alert if Arpeggio's own overhead exceeds 10% of spend
+
+# Providers. api_key names where the key lives: an environment variable
+# ("env:NAME") or an OS keychain entry ("keychain:NAME"). A pasted key fails
+# validation. An openai_compatible provider needs an https base_url. An anthropic
+# provider must not set one.
+[providers.anthropic]
+kind    = "anthropic"
+api_key = "env:ANTHROPIC_API_KEY"
+
+[providers.deepseek]
+kind     = "openai_compatible"
+base_url = "https://api.deepseek.com"
+api_key  = "env:DEEPSEEK_API_KEY"
+
+# Models are keyed "tier<N>.<name>", and the tier comes from the key: tier1 is the
+# cheap worker, tier2 the default builder, tier3 the frontier model. efforts lists
+# the effort levels this model accepts (low, medium, high, max).
+#
+# Prices are placeholders, in USD per million tokens. Fill them from each
+# provider's pricing page and record the date. Arpeggio snapshots the price on
+# every call.
+[models."tier1.cheap"]
+provider = "deepseek"
+model    = "<provider-model-id>"
+price_in_per_m  = 0.0
+price_out_per_m = 0.0
+efforts  = ["low", "medium"]
+
+[models."tier2.mid"]
+provider = "anthropic"
+model    = "<provider-model-id>"
+price_in_per_m  = 0.0
+price_out_per_m = 0.0
+efforts  = ["low", "medium", "high"]
+
+[models."tier3.frontier"]
+provider = "anthropic"
+model    = "<provider-model-id>"
+price_in_per_m  = 0.0
+price_out_per_m = 0.0
+efforts  = ["medium", "high", "max"]
+
+# The route used to estimate what a task would have cost without routing.
+# adapter is one of claude_code, opencode, command_code, api. The effort must be
+# one the chosen model lists.
+[defaults]
+counterfactual_route = { adapter = "claude_code", model = "tier3.frontier", effort = "high" }
+
+# Per-repo settings belong in <repo>/.arpeggio/config.toml. A [repo] table in
+# this global file is rejected.
+#
+# [repo]
+# privacy_class  = "private"       # public, private or client
+# provider_allow = ["anthropic"]   # omit to allow every provider above
