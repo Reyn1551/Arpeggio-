@@ -2,7 +2,7 @@
 
 > A personal AI workbench: one orchestrator on top of many coding agents and models that picks the cheapest path that is still correct, verifies the result, and learns from every task.
 
-**Status:** v0. Milestones M0.1 and M0.2 are done: validated config, `arpeggio init` and `arpeggio config`, the SQLite store with migrations, and JSON-lines logs.
+**Status:** v0. Milestones M0.1, M0.2 and M0.2.5 are done: validated config with budget profiles, four profile templates, `arpeggio init --profile` and `arpeggio config`, the SQLite store with migrations and pre-migration backups, and JSON-lines logs.
 
 *Like an arpeggio, which plays a chord one note at a time from the bottom up, Arpeggio plays every task from the cheapest capable model upward, and only climbs when it has to.*
 
