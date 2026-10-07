@@ -1,12 +1,11 @@
 import asyncio
-import os
 import sqlite3
 import sys
 from pathlib import Path
 from typing import Any
 
 import pytest
-from gitrepo import make_repo
+from gitrepo import link_directory, make_repo
 
 from arpeggio_ai.safety.process import scrubbed_env
 from arpeggio_ai.store.artifacts import ArtifactStore
@@ -21,19 +20,6 @@ from arpeggio_ai.store.repositories import (
     register_repo,
 )
 from arpeggio_ai.verify.runner import run_criteria
-
-
-def link_directory(target: Path, link: Path) -> None:
-    """A directory symlink, or a junction on Windows where symlinks need a privilege."""
-    try:
-        os.symlink(target, link, target_is_directory=True)
-    except OSError:
-        if sys.platform != "win32":
-            raise
-        import _winapi
-
-        _winapi.CreateJunction(str(target), str(link))
-
 
 PYTEST = [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider"]
 

@@ -5,7 +5,9 @@
 committed with ``core.autocrlf=false``, so the bytes are the same on every platform.
 """
 
+import os
 import subprocess
+import sys
 from pathlib import Path
 
 FILES = {
@@ -97,3 +99,15 @@ def snapshot(repo: Path) -> dict[str, object]:
         "status": run_git(repo, "status", "--porcelain"),
         "files": files,
     }
+
+
+def link_directory(target: Path, link: Path) -> None:
+    """A directory symlink, or a junction on Windows where symlinks need a privilege."""
+    try:
+        os.symlink(target, link, target_is_directory=True)
+    except OSError:
+        if sys.platform != "win32":
+            raise
+        import _winapi
+
+        _winapi.CreateJunction(str(target), str(link))
