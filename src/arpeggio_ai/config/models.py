@@ -230,6 +230,8 @@ class Limits(_Model):
 
 
 _PRICES = ("price_in_per_m", "price_cache_hit_in_per_m", "price_out_per_m")
+# Request fields the adapter owns. effort_params may not set them (CFG-08).
+RESERVED_REQUEST_FIELDS = ("model", "messages", "max_tokens", "stream")
 
 
 class ModelSpec(_Model):
@@ -304,6 +306,12 @@ class ModelSpec(_Model):
             (("effort_params", effort), "effort is not in this model's efforts")
             for effort in self.effort_params
             if effort not in self.efforts
+        ]
+        problems += [
+            (("effort_params", effort, name), "set by Arpeggio; effort_params may not override it")
+            for effort, params in self.effort_params.items()
+            for name in RESERVED_REQUEST_FIELDS
+            if name in params
         ]
         cache_hit = self.price_cache_hit_in_per_m
         if cache_hit is not None and cache_hit > self.price_in_per_m:

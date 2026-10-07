@@ -85,7 +85,7 @@ provider                = "deepseek"
 model                   = "deepseek-flash"
 response_model_aliases  = ["DeepSeek-V4.1-Flash"]   # verify against real responses
 efforts                 = ["low"]
-effort_params.low       = { thinking = false }   # verify parameter name in provider docs
+effort_params.low       = { thinking = { type = "disabled" } }   # https://api-docs.deepseek.com/guides/thinking_mode
 price_in_per_m          = 0.30
 price_cache_hit_in_per_m = 0.006
 price_out_per_m         = 1.20
@@ -98,8 +98,8 @@ provider = "deepseek"
 model    = "deepseek-flash"
 response_model_aliases = ["DeepSeek-V4.1-Flash"]   # verify against real responses
 efforts  = ["medium", "high"]
-effort_params.medium = { thinking = true }
-effort_params.high   = { thinking = true }
+effort_params.medium = { thinking = { type = "enabled" }, reasoning_effort = "low" }
+effort_params.high   = { thinking = { type = "enabled" }, reasoning_effort = "high" }
 price_in_per_m = 0.30
 price_cache_hit_in_per_m = 0.006
 price_out_per_m = 1.20
@@ -110,8 +110,8 @@ provider = "deepseek"
 model    = "deepseek-v4-pro"
 response_model_aliases = ["DeepSeek-V4-Pro-0813"]   # verify against real responses
 efforts  = ["high", "max"]
-effort_params.high = { thinking = true }
-effort_params.max  = { thinking = true }
+effort_params.high = { thinking = { type = "enabled" }, reasoning_effort = "high" }
+effort_params.max  = { thinking = { type = "enabled" }, reasoning_effort = "max" }
 price_in_per_m = 1.32
 price_cache_hit_in_per_m = 0.044
 price_out_per_m = 3.96
@@ -289,7 +289,7 @@ The key is `tier1`, `tier2` or `tier3`, a dot, then lowercase letters, digits, `
 | `provider` | string | Must name a provider above |
 | `model` | string | The provider's model id. Not empty |
 | `efforts` | list | Not empty, no repeats, from `low`, `medium`, `high`, `max` |
-| `effort_params.<effort>` | table | Optional. Provider request parameters for that effort (for example thinking on or off), passed to the adapter as is. Keys must be in `efforts` (CFG-08) |
+| `effort_params.<effort>` | table | Optional. Provider request parameters for that effort (for example thinking on or off), passed to the adapter as is and merged into the top level of the request body. Keys must be in `efforts`. The parameters may not set `model`, `messages`, `max_tokens` or `stream` (CFG-08) |
 | `price_in_per_m`, `price_out_per_m` | float | `>= 0`, USD per million tokens, peak prices when the provider has windows |
 | `price_cache_hit_in_per_m` | float | `>= 0` and at most `price_in_per_m`. Defaults to `price_in_per_m` (CFG-05) |
 | `free` | bool | Default `false`. When `true`, all three prices must be 0. Under the `free` profile every model must be `free = true` or served by a loopback provider, with zero prices (BUD-02) |

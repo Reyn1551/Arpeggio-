@@ -172,7 +172,7 @@
 | CFG-05 | P0 | Pricing MUST support input, output, and cache-hit input prices per model, plus provider-level peak windows (UTC weekday ranges) with an off-peak multiplier. | Cost calculator returns correct values for peak, off-peak, and cache-hit fixtures. |
 | CFG-06 | P0 | `base_url` MUST use `https`, except loopback hosts (`localhost`, `127.0.0.1`, `::1`), which may use `http` (local gateways, Ollama). `api_key` is optional only for loopback providers. | Validation tests for each case. |
 | CFG-07 | P0 | Each provider MUST declare `data_use`: `no_training`, `may_train`, or `unknown` (default `unknown`). | Field validated and shown in `config show`. |
-| CFG-08 | P0 | Models MAY declare `effort_params`: a mapping from effort level to provider-specific request parameters (e.g. thinking on/off). Keys MUST be a subset of the model's `efforts`. | Validation test. |
+| CFG-08 | P0 | Models MAY declare `effort_params`: a mapping from effort level to provider-specific request parameters (e.g. thinking on/off). Keys MUST be a subset of the model's `efforts`. The parameters MUST NOT set `model`, `messages`, `max_tokens` or `stream`, which the adapter owns. | Validation test. |
 | CFG-09 | P0 | Each model MUST declare `last_verified` (date) for its price and limit data. | `arpeggio doctor` warns when older than 30 days. |
 | CFG-10 | P0 | Models MAY declare `response_model_aliases`: model names a provider may return for this model. A response whose model matches the requested model or an alias is not a mismatch. | Alias match is not flagged, a non-alias is flagged (tested in M0.3). |
 

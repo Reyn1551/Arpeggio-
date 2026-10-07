@@ -1,10 +1,12 @@
 """Model pricing, limits, effort params, aliases and the free-profile model rule."""
 
+import tomllib
 from datetime import date, datetime, timedelta
 from typing import Any
 
 import pytest
 
+from arpeggio_ai.config.loader import template_bytes
 from arpeggio_ai.config.models import parse_config
 from arpeggio_ai.core.errors import ConfigError
 
@@ -99,6 +101,37 @@ def test_effort_params_key_outside_efforts_is_rejected(
     mid["effort_params"] = {"max": {"thinking": True}}  # tier2.mid allows low, medium, high
     assert fields(config_data) == {
         f"models.{MID}.effort_params.max": "effort is not in this model's efforts"
+    }
+
+
+@pytest.mark.parametrize("name", ["model", "messages", "max_tokens", "stream"])
+def test_effort_params_may_not_set_request_fields(
+    config_data: dict[str, Any], mid: dict[str, Any], name: str
+) -> None:
+    mid["effort_params"] = {"high": {"thinking": {"type": "enabled"}, name: 1}}
+    assert fields(config_data) == {
+        f"models.{MID}.effort_params.high.{name}": (
+            "set by Arpeggio; effort_params may not override it"
+        )
+    }
+
+
+def test_micro_deepseek_uses_documented_thinking_parameters() -> None:
+    # https://api-docs.deepseek.com/guides/thinking_mode: a top-level "thinking" object
+    # with type enabled/disabled, and a top-level reasoning_effort.
+    config = parse_config(tomllib.loads(template_bytes("micro-deepseek").decode("utf-8")))
+    params = {key: spec.effort_params for key, spec in config.models.items()}
+    on = {"thinking": {"type": "enabled"}}
+    assert params == {
+        "tier1.flash": {"low": {"thinking": {"type": "disabled"}}},
+        "tier2.flash": {
+            "medium": {**on, "reasoning_effort": "low"},
+            "high": {**on, "reasoning_effort": "high"},
+        },
+        "tier3.pro": {
+            "high": {**on, "reasoning_effort": "high"},
+            "max": {**on, "reasoning_effort": "max"},
+        },
     }
 
 
