@@ -1,0 +1,69 @@
+# Arpeggio config: micro profile on DeepSeek.
+#
+# For: a few dollars of prepaid DeepSeek credit (for example $2) and no other provider.
+# All three tiers come from DeepSeek's two models and their thinking modes.
+# Expects: DEEPSEEK_API_KEY in the environment.
+#
+# Prices, peak windows and model names were last verified on 2026-10-07 at
+# https://api-docs.deepseek.com/quick_start/pricing. They change: check them again
+# and update last_verified when you do. Check your edits with `arpeggio config validate`.
+
+[budget]
+profile             = "micro"   # free | micro | standard | pro
+per_task_usd        = 0.20      # all three must be 0 under "free"
+per_day_usd         = 0.50
+per_month_usd       = 2.00
+prepaid_balance_usd = 2.00      # required under "micro"
+reserve_usd         = 0.10      # micro only; never spend below this
+overhead_alert      = 0.10
+max_quota_wait_s    = 120
+
+[providers.deepseek]
+kind      = "openai_compatible"         # anthropic | openai_compatible
+base_url  = "https://api.deepseek.com"
+api_key   = "env:DEEPSEEK_API_KEY"      # optional only for loopback base_url
+gateway   = false
+data_use  = "unknown"                   # no_training | may_train | unknown
+[providers.deepseek.pricing_windows]
+peak_utc           = ["Mon-Fri 01:00-04:00", "Mon-Fri 06:00-10:00"]
+offpeak_multiplier = 0.5                # prices below are PEAK prices
+
+[models."tier1.flash"]
+provider                = "deepseek"
+model                   = "deepseek-flash"
+response_model_aliases  = ["DeepSeek-V4.1-Flash"]   # verify against real responses
+efforts                 = ["low"]
+effort_params.low       = { thinking = false }   # verify parameter name in provider docs
+price_in_per_m          = 0.30
+price_cache_hit_in_per_m = 0.006
+price_out_per_m         = 1.20
+free                    = false
+limits                  = {}                     # optional: rpm, rpd, tpm, tpd
+last_verified           = "2026-10-07"
+
+[models."tier2.flash"]
+provider = "deepseek"
+model    = "deepseek-flash"
+response_model_aliases = ["DeepSeek-V4.1-Flash"]   # verify against real responses
+efforts  = ["medium", "high"]
+effort_params.medium = { thinking = true }
+effort_params.high   = { thinking = true }
+price_in_per_m = 0.30
+price_cache_hit_in_per_m = 0.006
+price_out_per_m = 1.20
+last_verified = "2026-10-07"
+
+[models."tier3.pro"]
+provider = "deepseek"
+model    = "deepseek-v4-pro"
+response_model_aliases = ["DeepSeek-V4-Pro-0813"]   # verify against real responses
+efforts  = ["high", "max"]
+effort_params.high = { thinking = true }
+effort_params.max  = { thinking = true }
+price_in_per_m = 1.32
+price_cache_hit_in_per_m = 0.044
+price_out_per_m = 3.96
+last_verified = "2026-10-07"
+
+[defaults]
+counterfactual_route = { adapter = "api", model = "tier3.pro", effort = "high" }

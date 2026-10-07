@@ -1,8 +1,12 @@
-# Arpeggio global config.
+# Arpeggio config: standard profile.
 #
-# `arpeggio init` copies this file to ~/.arpeggio/config.toml, or to
-# $ARPEGGIO_HOME/config.toml when that variable is set. Check your edits with
-# `arpeggio config validate`.
+# For: regular paid use on one or two providers.
+# Expects: ANTHROPIC_API_KEY and DEEPSEEK_API_KEY in the environment.
+#
+# Model ids and prices below are placeholders. Fill them from each provider's
+# pricing page and set last_verified to the day you checked. Prices and limits
+# change, so check them again from time to time. Arpeggio snapshots the price on
+# every call. Check your edits with `arpeggio config validate`.
 #
 # A repo can override any value here in <repo>/.arpeggio/config.toml. Tables merge
 # key by key. Arrays and single values from the repo file replace the global ones.
@@ -18,47 +22,47 @@ overhead_alert = 0.10        # alert if Arpeggio's own overhead exceeds 10% of s
 
 # Providers. api_key names where the key lives: an environment variable
 # ("env:NAME") or an OS keychain entry ("keychain:NAME"). A pasted key fails
-# validation. An openai_compatible provider needs an https base_url. An anthropic
-# provider must not set one.
+# validation. An openai_compatible provider needs an https base_url. data_use
+# stays "unknown" until you have read the provider's terms.
 [providers.anthropic]
-kind    = "anthropic"
-api_key = "env:ANTHROPIC_API_KEY"
+kind     = "anthropic"
+api_key  = "env:ANTHROPIC_API_KEY"
+data_use = "unknown"         # no_training | may_train | unknown
 
 [providers.deepseek]
 kind     = "openai_compatible"
 base_url = "https://api.deepseek.com"
 api_key  = "env:DEEPSEEK_API_KEY"
+data_use = "unknown"
 
 # Models are keyed "tier<N>.<name>", and the tier comes from the key: tier1 is the
 # cheap worker, tier2 the default builder, tier3 the frontier model. efforts lists
 # the effort levels this model accepts (low, medium, high, max).
 #
-# Prices are placeholders, in USD per million tokens. Fill them from each
-# provider's pricing page and record the date. Arpeggio snapshots the price on
-# every call.
+# Prices are in USD per million tokens: fill them from the provider pricing page.
 [models."tier1.cheap"]
-provider = "deepseek"
-model    = "<provider-model-id>"
+provider        = "deepseek"
+model           = "<provider-model-id>"
+efforts         = ["low", "medium"]
 price_in_per_m  = 0.0
 price_out_per_m = 0.0
 last_verified   = "2026-10-07"
-efforts  = ["low", "medium"]
 
 [models."tier2.mid"]
-provider = "anthropic"
-model    = "<provider-model-id>"
+provider        = "anthropic"
+model           = "<provider-model-id>"
+efforts         = ["low", "medium", "high"]
 price_in_per_m  = 0.0
 price_out_per_m = 0.0
 last_verified   = "2026-10-07"
-efforts  = ["low", "medium", "high"]
 
 [models."tier3.frontier"]
-provider = "anthropic"
-model    = "<provider-model-id>"
+provider        = "anthropic"
+model           = "<provider-model-id>"
+efforts         = ["medium", "high", "max"]
 price_in_per_m  = 0.0
 price_out_per_m = 0.0
 last_verified   = "2026-10-07"
-efforts  = ["medium", "high", "max"]
 
 # The route used to estimate what a task would have cost without routing.
 # adapter is one of claude_code, opencode, command_code, api. The effort must be
@@ -70,5 +74,6 @@ counterfactual_route = { adapter = "claude_code", model = "tier3.frontier", effo
 # this global file is rejected.
 #
 # [repo]
-# privacy_class  = "private"       # public, private or client
-# provider_allow = ["anthropic"]   # omit to allow every provider above
+# privacy_class            = "private"       # public, private or client
+# provider_allow           = ["anthropic"]   # omit to allow every provider above
+# allow_training_providers = false           # true lets this repo use "unknown" providers

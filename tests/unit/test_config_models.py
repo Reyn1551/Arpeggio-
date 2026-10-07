@@ -1,8 +1,10 @@
+import tomllib
 from typing import Any
 
 import pytest
 from pydantic import ValidationError
 
+from arpeggio_ai.config.loader import template_bytes
 from arpeggio_ai.config.models import INLINE_KEY_MESSAGE, Config, is_key_reference, parse_config
 from arpeggio_ai.core.errors import ConfigError, ConfigIssue
 
@@ -18,6 +20,14 @@ def fields(data: dict[str, Any]) -> dict[str | None, str]:
 
 
 # Template (case 1) and derived values
+
+
+@pytest.mark.parametrize("name", ["free", "micro-deepseek", "standard", "pro"])
+def test_every_packaged_template_validates(name: str) -> None:
+    text = template_bytes(name).decode("utf-8")
+    config = parse_config(tomllib.loads(text))
+    expected_profile = name.split("-", 1)[0]
+    assert config.budget.profile == expected_profile
 
 
 def test_packaged_template_validates(config_data: dict[str, Any]) -> None:

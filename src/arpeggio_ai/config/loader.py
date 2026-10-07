@@ -9,10 +9,23 @@ from arpeggio_ai.config.models import INLINE_KEY_MESSAGE, Config, is_key_referen
 from arpeggio_ai.core.errors import ConfigError, ConfigIssue
 from arpeggio_ai.paths import global_config_path, repo_config_path
 
+# Packaged config templates, one per budget profile (CLI-05). `init` writes DEFAULT_TEMPLATE.
+TEMPLATES = ("free", "micro-deepseek", "standard", "pro")
+DEFAULT_TEMPLATE = "free"
 
-def example_config_bytes() -> bytes:
-    """The packaged example config that `arpeggio init` writes."""
-    return files("arpeggio_ai.config").joinpath("templates", "config.example.toml").read_bytes()
+
+def template_bytes(name: str) -> bytes:
+    """The packaged template ``templates/<name>.toml``, byte for byte."""
+    if name not in TEMPLATES:
+        raise ValueError(f"unknown template {name!r}")
+    return files("arpeggio_ai.config").joinpath("templates", f"{name}.toml").read_bytes()
+
+
+def template_env_vars(name: str) -> list[str]:
+    """Environment variables the template's providers read their API keys from."""
+    providers = tomllib.loads(template_bytes(name).decode("utf-8")).get("providers", {})
+    refs = (table.get("api_key", "") for table in providers.values())
+    return sorted({ref.removeprefix("env:") for ref in refs if ref.startswith("env:")})
 
 
 def read_toml(path: Path) -> dict[str, Any]:

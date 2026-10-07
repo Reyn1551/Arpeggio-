@@ -190,7 +190,10 @@ arpeggio/
 │   ├── paths.py                   # ARPEGGIO_HOME and config file locations
 │   ├── config/                    # models.py (Pydantic schema), loader.py (read, merge, validate)
 │   │   └── templates/
-│   │       └── config.example.toml    # providers, tiers, prices, budgets (written by `arpeggio init`)
+│   │       ├── free.toml               # one template per budget profile, written by
+│   │       ├── micro-deepseek.toml     #   `arpeggio init --profile <name>`
+│   │       ├── standard.toml
+│   │       └── pro.toml
 │   ├── cli/                       # Typer app, output helpers, commands/
 │   ├── core/                      # errors.py, ids.py (ULID), clock.py (UTC timestamps), logs.py (JSON lines),
 │   │                              #   later task, attempt, lifecycle state machine, orchestrator
@@ -215,7 +218,7 @@ arpeggio/
     └── integration/
 ```
 
-The example config lives at `src/arpeggio_ai/config/templates/config.example.toml`, inside the package, so an installed `arpeggio init` can read it through `importlib.resources`.
+The profile templates (`free.toml`, `micro-deepseek.toml`, `standard.toml`, `pro.toml`) live in `src/arpeggio_ai/config/templates/`, inside the package, so an installed `arpeggio init` can read them through `importlib.resources`.
 
 ## Data and file locations
 

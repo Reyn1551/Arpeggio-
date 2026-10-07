@@ -14,8 +14,12 @@ from arpeggio_ai.store.db import open_db
 
 @pytest.fixture
 def template_text() -> str:
-    """The packaged example config, read the same way an installed package would."""
-    resource = files("arpeggio_ai.config").joinpath("templates", "config.example.toml")
+    """The packaged standard template, read the same way an installed package would.
+
+    Most config tests start from it: anthropic and deepseek providers, models tier1.cheap,
+    tier2.mid and tier3.frontier, profile "standard".
+    """
+    resource = files("arpeggio_ai.config").joinpath("templates", "standard.toml")
     return resource.read_text(encoding="utf-8")
 
 

@@ -43,51 +43,82 @@ Tiers are logical. Concrete models and prices live in config and change over tim
 | `tier2` (mid) | Default builder | Most features, local refactors, data scripts, tests |
 | `tier3` (frontier) | Planner / expert / reviewer | Architecture, hard debugging, cross-file changes, `full` reviews, high-risk tasks |
 
-### Example config (`src/arpeggio_ai/config/templates/config.example.toml`)
+### Config templates
 
-`arpeggio init` copies the packaged template to `~/.arpeggio/config.toml`. The template carries more comments than the excerpt below, and if the two ever differ, the template is correct.
+`arpeggio init --profile <name>` writes one of four packaged templates from `src/arpeggio_ai/config/templates/` to `~/.arpeggio/config.toml`: `free.toml` (free tiers and local models, the default), `micro-deepseek.toml` (a few dollars of DeepSeek credit), `standard.toml` and `pro.toml`. Each template opens with the environment variables it expects. Field rules are in the [config reference](#config-reference).
+
+The micro template in full. A test keeps this copy identical to the packaged file:
 
 ```toml
-[budget]
-per_task_usd   = 2.00
-per_day_usd    = 10.00
-per_month_usd  = 150.00
-overhead_alert = 0.10        # alert if Arpeggio's own overhead exceeds 10% of spend
+# Arpeggio config: micro profile on DeepSeek.
+#
+# For: a few dollars of prepaid DeepSeek credit (for example $2) and no other provider.
+# All three tiers come from DeepSeek's two models and their thinking modes.
+# Expects: DEEPSEEK_API_KEY in the environment.
+#
+# Prices, peak windows and model names were last verified on 2026-10-07 at
+# https://api-docs.deepseek.com/quick_start/pricing. They change: check them again
+# and update last_verified when you do. Check your edits with `arpeggio config validate`.
 
-[providers.anthropic]
-kind    = "anthropic"
-api_key = "env:ANTHROPIC_API_KEY"
+[budget]
+profile             = "micro"   # free | micro | standard | pro
+per_task_usd        = 0.20      # all three must be 0 under "free"
+per_day_usd         = 0.50
+per_month_usd       = 2.00
+prepaid_balance_usd = 2.00      # required under "micro"
+reserve_usd         = 0.10      # micro only; never spend below this
+overhead_alert      = 0.10
+max_quota_wait_s    = 120
 
 [providers.deepseek]
-kind     = "openai_compatible"
-base_url = "https://api.deepseek.com"
-api_key  = "env:DEEPSEEK_API_KEY"
+kind      = "openai_compatible"         # anthropic | openai_compatible
+base_url  = "https://api.deepseek.com"
+api_key   = "env:DEEPSEEK_API_KEY"      # optional only for loopback base_url
+gateway   = false
+data_use  = "unknown"                   # no_training | may_train | unknown
+[providers.deepseek.pricing_windows]
+peak_utc           = ["Mon-Fri 01:00-04:00", "Mon-Fri 06:00-10:00"]
+offpeak_multiplier = 0.5                # prices below are PEAK prices
 
-# Prices are placeholders. Fill them from each provider's pricing page and
-# record the date; Arpeggio snapshots the price on every call.
-[models."tier1.cheap"]
+[models."tier1.flash"]
+provider                = "deepseek"
+model                   = "deepseek-flash"
+response_model_aliases  = ["DeepSeek-V4.1-Flash"]   # verify against real responses
+efforts                 = ["low"]
+effort_params.low       = { thinking = false }   # verify parameter name in provider docs
+price_in_per_m          = 0.30
+price_cache_hit_in_per_m = 0.006
+price_out_per_m         = 1.20
+free                    = false
+limits                  = {}                     # optional: rpm, rpd, tpm, tpd
+last_verified           = "2026-10-07"
+
+[models."tier2.flash"]
 provider = "deepseek"
-model    = "<provider-model-id>"
-price_in_per_m  = 0.0
-price_out_per_m = 0.0
-efforts  = ["low", "medium"]
+model    = "deepseek-flash"
+response_model_aliases = ["DeepSeek-V4.1-Flash"]   # verify against real responses
+efforts  = ["medium", "high"]
+effort_params.medium = { thinking = true }
+effort_params.high   = { thinking = true }
+price_in_per_m = 0.30
+price_cache_hit_in_per_m = 0.006
+price_out_per_m = 1.20
+last_verified = "2026-10-07"
 
-[models."tier2.mid"]
-provider = "anthropic"
-model    = "<provider-model-id>"
-price_in_per_m  = 0.0
-price_out_per_m = 0.0
-efforts  = ["low", "medium", "high"]
-
-[models."tier3.frontier"]
-provider = "anthropic"
-model    = "<provider-model-id>"
-price_in_per_m  = 0.0
-price_out_per_m = 0.0
-efforts  = ["medium", "high", "max"]
+[models."tier3.pro"]
+provider = "deepseek"
+model    = "deepseek-v4-pro"
+response_model_aliases = ["DeepSeek-V4-Pro-0813"]   # verify against real responses
+efforts  = ["high", "max"]
+effort_params.high = { thinking = true }
+effort_params.max  = { thinking = true }
+price_in_per_m = 1.32
+price_cache_hit_in_per_m = 0.044
+price_out_per_m = 3.96
+last_verified = "2026-10-07"
 
 [defaults]
-counterfactual_route = { adapter = "claude_code", model = "tier3.frontier", effort = "high" }
+counterfactual_route = { adapter = "api", model = "tier3.pro", effort = "high" }
 ```
 
 ## Risk classification
@@ -217,6 +248,66 @@ What Arpeggio will not do:
 - Use reverse-engineered or MITM endpoints, or scrape web UIs.
 - Reuse subscription credentials outside the provider's official clients.
 - Depend on gateway features that do any of the above.
+
+## Config reference
+
+The validation contract for `config.toml` (CFG-02 to CFG-10). Unknown fields are rejected everywhere.
+
+### `[budget]`
+
+| Field | Type | Rule |
+|---|---|---|
+| `profile` | string | One of `free`, `micro`, `standard`, `pro`. Required (BUD-01) |
+| `per_task_usd`, `per_day_usd`, `per_month_usd` | float | `>= 0`. All 0 under `free`. Otherwise all `> 0` and `per_task_usd <= per_day_usd <= per_month_usd` |
+| `prepaid_balance_usd` | float | Required and `> 0` under `micro`. Not allowed under `free` |
+| `reserve_usd` | float | Default 0.10. Under `micro` it must be below `prepaid_balance_usd`, and Arpeggio never spends below it (BUD-03) |
+| `overhead_alert` | float | `0 < x <= 1`, default 0.10 |
+| `max_quota_wait_s` | int | `>= 0`, default 120 (QTA-03) |
+
+### `[providers.<name>]`
+
+The name starts with a lowercase letter and uses lowercase letters, digits, `_` and `-`. At least one provider is required.
+
+| Field | Type | Rule |
+|---|---|---|
+| `kind` | string | `anthropic` or `openai_compatible` |
+| `base_url` | string | Required for `openai_compatible`, optional for `anthropic` (for Anthropic-format endpoints such as DeepSeek's). Must be `https://`, except `localhost`, `127.0.0.1` and `[::1]`, which may use `http://` (CFG-06) |
+| `api_key` | string | `env:NAME` or `keychain:NAME`, never the key itself (CFG-03). Optional only when `base_url` is a loopback address |
+| `gateway` | bool | Default `false`. Set it on gateways such as OpenRouter or a local LiteLLM (RTE-11) |
+| `data_use` | string | `no_training`, `may_train` or `unknown` (default) (CFG-07) |
+| `pricing_windows.peak_utc` | list of strings | Optional. Each item is `Day[-Day] HH:MM-HH:MM` in UTC, for example `Mon-Fri 01:00-04:00`. Days are `Mon` to `Sun`, a day range goes forward within one week, and start is before end (`24:00` is allowed as an end). Split a window that crosses midnight into two |
+| `pricing_windows.offpeak_multiplier` | float | `0 < x <= 1`. Required when `peak_utc` is set. Model prices are peak prices, and off-peak calls cost price × multiplier (CFG-05) |
+
+Two providers with the same `kind` and the same `base_url` are rejected, ignoring the case of scheme and host and a trailing `/`. One provider means one account (QTA-04).
+
+### `[models."tier<N>.<name>"]`
+
+The key is `tier1`, `tier2` or `tier3`, a dot, then lowercase letters, digits, `_` or `-`. The tier comes from the key. At least one model is required.
+
+| Field | Type | Rule |
+|---|---|---|
+| `provider` | string | Must name a provider above |
+| `model` | string | The provider's model id. Not empty |
+| `efforts` | list | Not empty, no repeats, from `low`, `medium`, `high`, `max` |
+| `effort_params.<effort>` | table | Optional. Provider request parameters for that effort (for example thinking on or off), passed to the adapter as is. Keys must be in `efforts` (CFG-08) |
+| `price_in_per_m`, `price_out_per_m` | float | `>= 0`, USD per million tokens, peak prices when the provider has windows |
+| `price_cache_hit_in_per_m` | float | `>= 0` and at most `price_in_per_m`. Defaults to `price_in_per_m` (CFG-05) |
+| `free` | bool | Default `false`. When `true`, all three prices must be 0. Under the `free` profile every model must be `free = true` or served by a loopback provider, with zero prices (BUD-02) |
+| `limits` | table | Optional `rpm`, `rpd`, `tpm`, `tpd`, each an integer `> 0` (QTA-01) |
+| `last_verified` | date | Required. `YYYY-MM-DD` (TOML date or string), not in the future (CFG-09) |
+| `response_model_aliases` | list of strings | Default empty. Names the provider may return for this model, for example a dated version. Not empty, no repeats (CFG-10) |
+
+### `[defaults]`
+
+`counterfactual_route = { adapter, model, effort }`. `adapter` is `claude_code`, `opencode`, `command_code` or `api`. `model` must be a model key above, and `effort` must be one of that model's `efforts`.
+
+### `[repo]` (only in `<repo>/.arpeggio/config.toml`)
+
+| Field | Type | Rule |
+|---|---|---|
+| `privacy_class` | string | `public`, `private` (default) or `client` |
+| `provider_allow` | list | Optional. Every name must be a provider above |
+| `allow_training_providers` | bool | Default `false`. `true` lets this repo use providers whose `data_use` is `may_train` or `unknown` (SAF-07) |
 
 ## Learned router (v2): contextual bandit
 

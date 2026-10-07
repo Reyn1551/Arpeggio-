@@ -4,7 +4,14 @@ from pathlib import Path
 
 import pytest
 
-from arpeggio_ai.config.loader import deep_merge, example_config_bytes, load_config, read_toml
+from arpeggio_ai.config.loader import (
+    TEMPLATES,
+    deep_merge,
+    load_config,
+    read_toml,
+    template_bytes,
+    template_env_vars,
+)
 from arpeggio_ai.config.models import INLINE_KEY_MESSAGE, parse_config
 from arpeggio_ai.core.errors import ConfigError, ConfigIssue
 
@@ -17,8 +24,27 @@ def load_issues(repo: Path | None = None) -> list[ConfigIssue]:
     return exc_info.value.issues
 
 
-def test_example_config_bytes_is_the_packaged_template(template_text: str) -> None:
-    text = example_config_bytes().decode("utf-8")
+@pytest.mark.parametrize(
+    ("name", "env_vars"),
+    [
+        ("free", ["GEMINI_API_KEY", "GROQ_API_KEY", "OPENROUTER_API_KEY"]),
+        ("micro-deepseek", ["DEEPSEEK_API_KEY"]),
+        ("standard", ["ANTHROPIC_API_KEY", "DEEPSEEK_API_KEY"]),
+        ("pro", ["ANTHROPIC_API_KEY", "DEEPSEEK_API_KEY", "OPENAI_API_KEY"]),
+    ],
+)
+def test_template_env_vars(name: str, env_vars: list[str]) -> None:
+    assert template_env_vars(name) == env_vars
+
+
+def test_templates_are_the_four_profiles() -> None:
+    assert TEMPLATES == ("free", "micro-deepseek", "standard", "pro")
+    with pytest.raises(ValueError):
+        template_bytes("config.example")
+
+
+def test_template_bytes_is_the_packaged_file(template_text: str) -> None:
+    text = template_bytes("standard").decode("utf-8")
     # Compare lines: a Windows checkout with core.autocrlf stores the template with CRLF.
     assert text.splitlines() == template_text.splitlines()
     parse_config(tomllib.loads(text))

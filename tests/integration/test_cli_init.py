@@ -13,7 +13,7 @@ from typer.testing import CliRunner
 
 from arpeggio_ai.cli.app import app
 from arpeggio_ai.cli.commands import init as init_module
-from arpeggio_ai.config.loader import example_config_bytes, load_config
+from arpeggio_ai.config.loader import load_config, template_bytes
 from arpeggio_ai.core.logs import close_logging
 from arpeggio_ai.store.db import open_db
 from arpeggio_ai.store.repositories import create_task, ensure_repo
@@ -56,7 +56,7 @@ def test_init_creates_home_subdirs_and_config(home: Path) -> None:
         "backup": None,
     }
     assert all((home / name).is_dir() for name in SUBDIRS)
-    assert (home / "config.toml").read_bytes() == example_config_bytes()
+    assert (home / "config.toml").read_bytes() == template_bytes("free")
     assert schema_version(home / "arpeggio.db") == 1
     load_config()
 
@@ -100,7 +100,7 @@ def test_force_backs_up_existing_config_and_writes_fresh_one(home: Path) -> None
     assert backup.parent == home
     assert re.fullmatch(r"config\.toml\.bak\.\d{8}T\d{6}Z", backup.name)
     assert backup.read_text(encoding="utf-8") == "# my edits\n"
-    assert (home / "config.toml").read_bytes() == example_config_bytes()
+    assert (home / "config.toml").read_bytes() == template_bytes("free")
     assert payload["created"] == [str(home / "config.toml")]
     assert payload["skipped"] == [*dir_paths(home), str(home / "arpeggio.db")]
 

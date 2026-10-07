@@ -10,7 +10,7 @@ import typer
 from rich.text import Text
 
 from arpeggio_ai.cli.output import JSON_HELP, console, emit_json, json_mode, run_command
-from arpeggio_ai.config.loader import example_config_bytes
+from arpeggio_ai.config.loader import DEFAULT_TEMPLATE, template_bytes
 from arpeggio_ai.core.errors import ArpeggioError
 from arpeggio_ai.core.logs import configure_logging
 from arpeggio_ai.paths import RUNTIME_SUBDIRS, arpeggio_home, db_path, global_config_path, logs_dir
@@ -70,7 +70,7 @@ def initialize(home: Path, force: bool) -> InitResult:
         result.skipped.append(str(config_path))
     else:
         with config_path.open("xb") as handle:
-            handle.write(example_config_bytes())
+            handle.write(template_bytes(DEFAULT_TEMPLATE))
         result.created.append(str(config_path))
 
     # Opening the database creates it if needed and applies pending migrations. An existing
