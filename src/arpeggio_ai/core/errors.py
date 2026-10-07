@@ -38,3 +38,15 @@ class ConfigError(ArpeggioError):
     def __init__(self, issues: list[ConfigIssue]) -> None:
         self.issues = list(issues)
         super().__init__("\n".join(str(issue) for issue in self.issues))
+
+
+class SecretNotFound(ArpeggioError):
+    """A secret reference points at nothing, for example an unset environment variable."""
+
+
+class SpendRefused(ArpeggioError):
+    """The spend guard refused a model call before any request was sent."""
+
+
+class AdapterError(ArpeggioError):
+    """An adapter was used in a way it does not support."""

@@ -122,6 +122,8 @@ class Step:
     price_window: PriceWindow | None
     price_multiplier: float
     price_cache_hit_per_m: float | None
+    provider: str | None
+    prompt_overhead_tokens: int | None
 
 
 def _require(field: str, value: str, allowed: Any) -> None:
@@ -394,18 +396,23 @@ def append_step(
     price_window: PriceWindow | None = None,
     price_multiplier: float = 1.0,
     price_cache_hit_per_m: float | None = None,
+    provider: str | None = None,
+    prompt_overhead_tokens: int | None = None,
 ) -> Step:
     """Record one step and add its tokens and cost to the attempt totals, atomically.
 
     The price fields are a snapshot of what applied to this call: the window (peak, off-peak
     or flat), its multiplier and the cache-hit input price. ``cost_usd`` is computed by the
     caller. ``actual_model`` is the model the provider says served the call (RTE-11).
+    ``provider`` and ``prompt_overhead_tokens`` feed the spend guard (``max_prompt_overhead``).
     """
     _require("step kind", kind, StepKind)
     if price_window is not None:
         _require("price window", price_window, PriceWindow)
     if not math.isfinite(price_multiplier) or price_multiplier <= 0:
         raise StoreError(f"price_multiplier must be > 0: {price_multiplier!r}")
+    if prompt_overhead_tokens is not None and prompt_overhead_tokens < 0:
+        raise StoreError(f"prompt_overhead_tokens must be >= 0: {prompt_overhead_tokens!r}")
     step_id = new_id()
     with transaction(conn):
         _get_attempt(conn, attempt_id)
@@ -414,8 +421,8 @@ def append_step(
             "INSERT INTO steps (id, attempt_id, seq, kind, summary, payload_ref, input_tokens,"
             " output_tokens, cached_tokens, price_in_per_m, price_out_per_m, cost_usd,"
             " cost_estimated, created_at, actual_model, price_window, price_multiplier,"
-            " price_cache_hit_per_m)"
-            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            " price_cache_hit_per_m, provider, prompt_overhead_tokens)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 step_id,
                 attempt_id,
@@ -435,6 +442,8 @@ def append_step(
                 price_window,
                 price_multiplier,
                 price_cache_hit_per_m,
+                provider,
+                prompt_overhead_tokens,
             ),
         )
         conn.execute(
@@ -453,6 +462,23 @@ def append_step(
         )
         row = conn.execute("SELECT * FROM steps WHERE id = ?", (step_id,)).fetchone()
     return _step(row)
+
+
+def max_prompt_overhead(
+    conn: sqlite3.Connection, provider: str, model: str, *, last: int = 20
+) -> int:
+    """Highest prompt overhead among the ``last`` recorded steps for this provider and model.
+
+    ``model`` is the logical model key (``attempts.model``). Returns 0 without history.
+    """
+    row = conn.execute(
+        "SELECT MAX(prompt_overhead_tokens) FROM ("
+        " SELECT s.prompt_overhead_tokens FROM steps s JOIN attempts a ON a.id = s.attempt_id"
+        " WHERE s.provider = ? AND a.model = ? AND s.prompt_overhead_tokens IS NOT NULL"
+        " ORDER BY s.created_at DESC, s.rowid DESC LIMIT ?)",
+        (provider, model, last),
+    ).fetchone()
+    return int(row[0] or 0)
 
 
 def list_steps(conn: sqlite3.Connection, attempt_id: str) -> list[Step]:

@@ -7,6 +7,7 @@ from arpeggio_ai.core.errors import StoreError
 from arpeggio_ai.store.repositories import (
     Attempt,
     Repo,
+    Step,
     Task,
     append_step,
     create_attempt,
@@ -15,6 +16,7 @@ from arpeggio_ai.store.repositories import (
     get_attempt,
     get_task,
     list_steps,
+    max_prompt_overhead,
     set_attempt_status,
     set_deferred_until,
     set_model_mismatch,
@@ -408,3 +410,50 @@ def test_bad_step_price_fields_are_rejected(
     with pytest.raises(StoreError, match=message):
         append_step(db, attempt.id, "model_call", **kwargs)
     assert list_steps(db, attempt.id) == []
+
+
+# Prompt overhead (steps.provider, steps.prompt_overhead_tokens)
+
+
+def overhead_step(
+    db: sqlite3.Connection, attempt: Attempt, overhead: int | None, **kw: Any
+) -> Step:
+    kw.setdefault("provider", "jembatanai")
+    return append_step(db, attempt.id, "model_call", prompt_overhead_tokens=overhead, **kw)
+
+
+def test_step_stores_provider_and_overhead(db: sqlite3.Connection, attempt: Attempt) -> None:
+    step = overhead_step(db, attempt, 13_500)
+    assert (step.provider, step.prompt_overhead_tokens) == ("jembatanai", 13_500)
+
+
+def test_negative_overhead_is_rejected(db: sqlite3.Connection, attempt: Attempt) -> None:
+    with pytest.raises(StoreError, match="prompt_overhead_tokens must be >= 0"):
+        overhead_step(db, attempt, -1)
+
+
+def test_max_prompt_overhead_without_history_is_zero(db: sqlite3.Connection) -> None:
+    assert max_prompt_overhead(db, "jembatanai", ROUTE["model"]) == 0
+
+
+def test_max_prompt_overhead_filters_provider_and_model(
+    db: sqlite3.Connection, task: Task, attempt: Attempt
+) -> None:
+    overhead_step(db, attempt, 100)
+    overhead_step(db, attempt, 900, provider="other")
+    overhead_step(db, attempt, None)
+    other_model = create_attempt(db, task.id, **{**ROUTE, "model": "tier3.frontier"})
+    overhead_step(db, other_model, 5_000)
+    assert max_prompt_overhead(db, "jembatanai", ROUTE["model"]) == 100
+    assert max_prompt_overhead(db, "other", ROUTE["model"]) == 900
+    assert max_prompt_overhead(db, "jembatanai", "tier3.frontier") == 5_000
+
+
+def test_max_prompt_overhead_reads_only_the_last_20_steps(
+    db: sqlite3.Connection, attempt: Attempt
+) -> None:
+    overhead_step(db, attempt, 99_999)  # oldest: falls out of the window
+    for value in range(20):
+        overhead_step(db, attempt, value)
+    assert max_prompt_overhead(db, "jembatanai", ROUTE["model"]) == 19
+    assert max_prompt_overhead(db, "jembatanai", ROUTE["model"], last=21) == 99_999

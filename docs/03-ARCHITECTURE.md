@@ -95,57 +95,66 @@ A **task** has one or more **attempts**. Each attempt is one route executed in o
 
 Every executor implements the same contract. Core code depends only on this protocol.
 
-```python
-from typing import Protocol, AsyncIterator
-from dataclasses import dataclass
+The code lives in `src/arpeggio_ai/adapters/base.py`. Abridged:
 
+```python
 @dataclass(frozen=True)
 class Route:
     adapter: str            # "claude_code" | "opencode" | "command_code" | "api"
-    model: str              # logical model id from config, e.g. "tier2.sonnet"
+    model: str              # logical model key from config, e.g. "tier2.flash"
     effort: str             # "low" | "medium" | "high" | "max"
     verification: str       # "light" | "full"
 
-@dataclass
+@dataclass(frozen=True)
 class AttemptSpec:
     task_id: str
     attempt_id: str
-    prompt: str             # final prompt incl. done criteria
-    worktree: str           # absolute path to isolated worktree
+    prompt: str             # first user turn, incl. done criteria
     route: Route
-    timeout_s: int
-    max_steps: int
-    context_files: list[str]
+    timeout_s: int          # read timeout and wall-clock deadline of each API request
+    max_steps: int          # model calls allowed in this attempt (EXE-06)
+    max_tokens: int         # output cap per model call, required
+    worktree: str | None = None           # absolute path to the isolated worktree (M0.4)
+    context_files: list[str] = []
+    system: str | None = None             # optional system message
+    follow_ups: list[str] = []            # later user turns, sent after each reply
 
-@dataclass
+@dataclass(frozen=True)
 class StepEvent:
     kind: str               # "model_call" | "tool_call" | "tool_result" | "message" | "approval_request"
-    payload: dict
-    input_tokens: int | None
-    output_tokens: int | None
-    cached_tokens: int | None
-    cost_usd: float | None
-    actual_model: str | None  # model named in the provider's response (RTE-11)
-    cost_estimated: bool
+    summary: str            # at most 200 characters, stored on the step
+    payload: dict           # stored as an artifact file, never in the database
+    input_tokens: int | None = None
+    output_tokens: int | None = None
+    cached_tokens: int | None = None      # cache-hit input tokens
+    cost_usd: float | None = None
+    actual_model: str | None = None       # model named in the provider's response (RTE-11)
+    cost_estimated: bool = False
+    price: PriceSnapshot | None = None    # window, multiplier and prices applied (CST-11)
+    model_mismatch: bool = False
 
-@dataclass
+@dataclass(frozen=True)
 class AttemptResult:
-    status: str             # "completed" | "timeout" | "error" | "paused"
+    status: str             # "completed" | "timeout" | "error" | "paused" | "cancelled"
     final_message: str
-    changed_files: list[str]
+    changed_files: list[str] = []
 
 class Adapter(Protocol):
     name: str
-    def capabilities(self) -> dict: ...          # effort control, token reporting, resume, mcp
-    async def run(self, spec: AttemptSpec) -> AsyncIterator[StepEvent]: ...
+    def capabilities(self) -> dict[str, bool]: ...   # effort_control, token_reporting, resume, mcp, streaming
+    def run(self, spec: AttemptSpec) -> AsyncIterator[StepEvent]: ...
     async def result(self) -> AttemptResult: ...
     async def cancel(self) -> None: ...
-    async def resume(self, attempt_id: str) -> AsyncIterator[StepEvent]: ...
+    def resume(self, attempt_id: str) -> AsyncIterator[StepEvent]: ...
 ```
 
 Notes:
 
+- Adapters are created through `adapters/registry.py` from an `AdapterContext` (config, clock, sleep, random source, environment, and an optional HTTP transport for tests). Core code imports `adapters.base` and `adapters.registry` only, never a concrete adapter (EXE-01). Built-in adapters are imported lazily, so commands that make no model call never load httpx.
+- Adapters do no disk or database I/O. `orchestrator/attempts.py` (`run_attempt`) consumes the events, writes each payload to `artifacts/`, appends the step with its price snapshot, flags a model mismatch on the attempt, and sets the final status.
+- Every adapter passes `tests/contract/test_adapter_contract.py` against a fake backend.
 - `capabilities()` lets the router avoid routes an adapter cannot honor (for example, effort control or exact token reporting).
+- The `api` adapter (M0.3) speaks non-streaming chat completions to `openai_compatible` providers at `POST {base_url}/chat/completions`. The model's `effort_params` for the chosen effort are merged into the top level of the request body. Before each request the spend guard (`cost/guard.py`) runs. `timeout_s` is both the read timeout and a wall-clock deadline for each request: a response that trickles in and is not complete in time ends the attempt with status `timeout` (EXE-06), and the call is recorded as an estimated step. 429, 500, 502, 503, 504 and timeouts are retried up to 3 times (full-jitter backoff, base 1 s, cap 30 s, `Retry-After` honored up to `max_quota_wait_s`), then the attempt ends with `error` (RTE-12). See [ADR-0007](adr/0007-httpx-and-first-network-calls.md).
 - Adapters that wrap CLIs parse the CLI's structured/streaming output. Exact flags must be verified against each tool's current documentation at implementation time.
 - Approval-gated actions surface as `approval_request` events; the orchestrator pauses the stream until a decision arrives.
 
@@ -199,8 +208,9 @@ arpeggio/
 │   │                              #   later task, attempt, lifecycle state machine, orchestrator
 │   ├── intake/                    # criteria derivation, clarification, splitting
 │   ├── routing/                   # risk.py, policy.py, bandit.py (v2), fallback.py
-│   ├── cost/                      # governor.py, pricing.py, budget.py, loops.py, context_diet.py
-│   ├── adapters/                  # base.py, registry.py, claude_code.py, api.py, opencode.py, command_code.py
+│   ├── cost/                      # pricing.py, guard.py; later governor.py, budget.py, loops.py, context_diet.py
+│   ├── adapters/                  # base.py, registry.py, api.py; later claude_code.py, opencode.py, command_code.py
+│   ├── orchestrator/              # attempts.py (run one attempt, record steps and artifacts)
 │   ├── verify/                    # runner.py, reviewer.py, depth.py
 │   ├── safety/                    # approvals.py, secrets.py, worktree.py, sandbox.py
 │   ├── store/                     # db.py (connection, migrations), repositories.py, artifacts.py,
@@ -244,3 +254,6 @@ See [ADRs](adr/). Summary:
 2. Python + SQLite, local-first ([ADR-0002](adr/0002-python-sqlite-local-first.md)).
 3. Rule-based router before learned router ([ADR-0003](adr/0003-rule-based-router-first.md)).
 4. Learning produces proposals, never direct changes ([ADR-0004](adr/0004-learning-via-proposals.md)).
+5. Budget profiles: the same pipeline at every budget ([ADR-0005](adr/0005-budget-profiles.md)).
+6. Gateways are plain providers, with provenance and privacy rules ([ADR-0006](adr/0006-gateways-and-free-tier-ethics.md)).
+7. httpx for provider calls, a spend guard before every request, no network in tests ([ADR-0007](adr/0007-httpx-and-first-network-calls.md)).

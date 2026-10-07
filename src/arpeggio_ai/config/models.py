@@ -91,6 +91,22 @@ def peak_window_problem(window: str) -> str | None:
     return None
 
 
+def peak_window_bounds(window: str) -> tuple[int, int, int, int]:
+    """``"Mon-Fri 01:00-04:00"`` -> (first day, last day, start minute, end minute).
+
+    Days count from Monday = 0 like ``datetime.weekday()``. The end minute is exclusive and
+    may be 1440 (``24:00``). Raises ValueError on a window that would fail validation.
+    """
+    match = _PEAK_WINDOW.fullmatch(window)
+    if match is None or peak_window_problem(window) is not None:
+        raise ValueError(f"invalid peak window: {window!r}")
+    first = _DAYS.index(match["first"])
+    last = _DAYS.index(match["last"]) if match["last"] else first
+    start = int(match["h1"]) * 60 + int(match["m1"])
+    end = int(match["h2"]) * 60 + int(match["m2"])
+    return first, last, start, end
+
+
 def _raise_if_any(title: str, problems: list[tuple[Loc, str]]) -> None:
     """Raise one ValidationError holding every problem, each at its own field location.
 
@@ -180,6 +196,8 @@ class Provider(_Model):
     gateway: bool = False
     data_use: DataUse = "unknown"
     pricing_windows: PricingWindows | None = None
+    # Input tokens the provider adds to every prompt (gateways may inject hidden context).
+    prompt_overhead_tokens: int = Field(default=0, ge=0)
 
     @field_validator("api_key")
     @classmethod
@@ -230,6 +248,8 @@ class Limits(_Model):
 
 
 _PRICES = ("price_in_per_m", "price_cache_hit_in_per_m", "price_out_per_m")
+# Request fields the adapter owns. effort_params may not set them (CFG-08).
+RESERVED_REQUEST_FIELDS = ("model", "messages", "max_tokens", "stream")
 
 
 class ModelSpec(_Model):
@@ -248,6 +268,8 @@ class ModelSpec(_Model):
     response_model_aliases: list[Annotated[str, StringConstraints(min_length=1)]] = Field(
         default_factory=list
     )
+    # Overrides the provider's prompt_overhead_tokens for this model when set.
+    prompt_overhead_tokens: int | None = Field(default=None, ge=0)
 
     # Set by Config from the model key ("tier2.mid" -> 2).
     _tier: int = PrivateAttr()
@@ -304,6 +326,12 @@ class ModelSpec(_Model):
             (("effort_params", effort), "effort is not in this model's efforts")
             for effort in self.effort_params
             if effort not in self.efforts
+        ]
+        problems += [
+            (("effort_params", effort, name), "set by Arpeggio; effort_params may not override it")
+            for effort, params in self.effort_params.items()
+            for name in RESERVED_REQUEST_FIELDS
+            if name in params
         ]
         cache_hit = self.price_cache_hit_in_per_m
         if cache_hit is not None and cache_hit > self.price_in_per_m:
