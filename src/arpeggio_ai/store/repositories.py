@@ -34,6 +34,9 @@ AttemptStatus = Literal["running", "completed", "timeout", "error", "paused", "c
 AttemptMode = Literal["normal", "explore", "shadow", "tournament"]
 Verification = Literal["light", "full"]
 StepKind = Literal["model_call", "tool_call", "tool_result", "message", "approval_request"]
+# Rows created before migration 0002 read profile 'unknown'. New rows never get it.
+StoredProfile = Literal["free", "micro", "standard", "pro", "unknown"]
+PriceWindow = Literal["peak", "offpeak", "flat"]
 
 FINAL_TASK_STATUSES = frozenset({"merged", "failed", "rejected", "cancelled"})
 FINAL_ATTEMPT_STATUSES = frozenset({"completed", "timeout", "error", "cancelled"})
@@ -66,6 +69,8 @@ class Task:
     counterfactual_usd: float | None
     created_at: str
     finished_at: str | None
+    profile: StoredProfile
+    deferrable: bool
 
 
 @dataclass(frozen=True, slots=True)
@@ -92,6 +97,8 @@ class Attempt:
     started_at: str
     finished_at: str | None
     checkpoint: dict[str, Any] | None
+    model_mismatch: bool
+    deferred_until: str | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -110,6 +117,10 @@ class Step:
     cost_usd: float | None
     cost_estimated: bool
     created_at: str
+    actual_model: str | None
+    price_window: PriceWindow | None
+    price_multiplier: float
+    price_cache_hit_per_m: float | None
 
 
 def _require(field: str, value: str, allowed: Any) -> None:
@@ -137,12 +148,16 @@ def _repo(row: sqlite3.Row) -> Repo:
 
 
 def _task(row: sqlite3.Row) -> Task:
-    return Task(**_row(row, json_cols=("risk_signals",)))
+    return Task(**_row(row, json_cols=("risk_signals",), bool_cols=("deferrable",)))
 
 
 def _attempt(row: sqlite3.Row) -> Attempt:
     return Attempt(
-        **_row(row, json_cols=("route_reason", "checkpoint"), bool_cols=("cost_estimated",))
+        **_row(
+            row,
+            json_cols=("route_reason", "checkpoint"),
+            bool_cols=("cost_estimated", "model_mismatch"),
+        )
     )
 
 

@@ -27,7 +27,9 @@ erDiagram
 - Large blobs (full tool outputs, diffs, logs) go to `~/.arpeggio/artifacts/`; the DB stores a relative path.
 - Rows are append-mostly. Status changes update a row; history of decisions is never deleted.
 
-## Schema (v1)
+## Schema
+
+The cumulative schema after every migration (currently `0001` and `0002`, see [Migration history](#migration-history)). Columns added by a later migration sit at the end of their table, in the order the migration adds them. A test builds this block in memory and compares it, column by column, with a database that ran all migrations.
 
 ```sql
 PRAGMA journal_mode = WAL;
@@ -59,7 +61,9 @@ CREATE TABLE tasks (
     budget_usd          REAL,
     counterfactual_usd  REAL,                   -- estimated cost on default frontier route
     created_at          TEXT NOT NULL,
-    finished_at         TEXT
+    finished_at         TEXT,
+    profile             TEXT NOT NULL DEFAULT 'unknown',  -- free|micro|standard|pro, or 'unknown' before 0002
+    "deferrable"        INTEGER NOT NULL DEFAULT 0       -- quoted: DEFERRABLE is an SQLite keyword (CST-10)
 );
 CREATE INDEX idx_tasks_status   ON tasks(status);
 CREATE INDEX idx_tasks_category ON tasks(category, risk);
@@ -91,11 +95,13 @@ CREATE TABLE attempts (
     cost_estimated  INTEGER NOT NULL DEFAULT 0,
     input_tokens    INTEGER NOT NULL DEFAULT 0,
     output_tokens   INTEGER NOT NULL DEFAULT 0,
-    cached_tokens   INTEGER NOT NULL DEFAULT 0,
+    cached_tokens   INTEGER NOT NULL DEFAULT 0,  -- cache-hit input tokens
     steps_count     INTEGER NOT NULL DEFAULT 0,
     started_at      TEXT NOT NULL,
     finished_at     TEXT,
     checkpoint      TEXT,                       -- JSON for resume
+    model_mismatch  INTEGER NOT NULL DEFAULT 0, -- served model differed from requested (RTE-11)
+    deferred_until  TEXT,                       -- start no earlier than this (CST-10)
     UNIQUE (task_id, seq)
 );
 CREATE INDEX idx_attempts_route ON attempts(adapter, model, effort);
@@ -109,12 +115,16 @@ CREATE TABLE steps (
     payload_ref     TEXT,                       -- path in artifacts/ for full content
     input_tokens    INTEGER,
     output_tokens   INTEGER,
-    cached_tokens   INTEGER,
+    cached_tokens   INTEGER,                    -- cache-hit input tokens
     price_in_per_m  REAL,                       -- USD per 1M input tokens at call time
     price_out_per_m REAL,
     cost_usd        REAL,
     cost_estimated  INTEGER NOT NULL DEFAULT 0,
     created_at      TEXT NOT NULL,
+    actual_model          TEXT,                 -- model named in the provider response
+    price_window          TEXT,                 -- 'peak' | 'offpeak' | 'flat'
+    price_multiplier      REAL NOT NULL DEFAULT 1.0,
+    price_cache_hit_per_m REAL,                 -- USD per 1M cache-hit input tokens at call time
     UNIQUE (attempt_id, seq)
 );
 
@@ -177,7 +187,8 @@ CREATE TABLE eval_runs (
     config_hash     TEXT NOT NULL,
     started_at      TEXT NOT NULL,
     finished_at     TEXT,
-    summary         TEXT                        -- JSON: metrics with confidence intervals
+    summary         TEXT,                       -- JSON: metrics with confidence intervals
+    profile         TEXT NOT NULL DEFAULT 'unknown'
 );
 
 CREATE TABLE eval_results (
@@ -188,7 +199,23 @@ CREATE TABLE eval_results (
     cost_usd        REAL NOT NULL,
     attempts        INTEGER NOT NULL,
     duration_s      REAL NOT NULL,
+    quota_wait_s    REAL NOT NULL DEFAULT 0,  -- time spent waiting on quotas
     PRIMARY KEY (eval_run_id, eval_task)
+);
+
+CREATE TABLE quota_usage (
+    provider        TEXT    NOT NULL,
+    model           TEXT    NOT NULL,
+    window          TEXT    NOT NULL,          -- 'minute' | 'day'
+    window_start    TEXT    NOT NULL,
+    requests        INTEGER NOT NULL DEFAULT 0,
+    input_tokens    INTEGER NOT NULL DEFAULT 0,
+    output_tokens   INTEGER NOT NULL DEFAULT 0,
+    remaining_req   INTEGER,                   -- from headers when available
+    remaining_tok   INTEGER,
+    reset_at        TEXT,
+    source          TEXT    NOT NULL,          -- 'config' | 'header'
+    PRIMARY KEY (provider, model, window, window_start)
 );
 
 CREATE TABLE schema_version (
@@ -201,9 +228,10 @@ CREATE TABLE schema_version (
 
 - The schema above ships as `src/arpeggio_ai/store/migrations/0001_initial.sql`, minus the two PRAGMAs. `store/db.py` sets those on every connection: `foreign_keys` only lasts for one connection, and `journal_mode` cannot change inside a transaction.
 - `open_db` applies pending migrations in order, each in its own `BEGIN IMMEDIATE` transaction, and refuses a database whose `schema_version` is newer than the code. A schema change means a new numbered file there plus an update to this document.
-- Status columns have no SQL `CHECK`. The repository layer (`store/repositories.py`) checks them against Python `Literal` types, because changing a `CHECK` in SQLite means rebuilding the table.
+- Status and enum-like columns have no SQL `CHECK`, including the ones added in `0002` (`tasks.profile`, `steps.price_window`, `quota_usage.window`, `quota_usage.source`). The repository layer (`store/repositories.py`) checks them against Python `Literal` types, because changing a `CHECK` in SQLite means rebuilding the table. Repositories write only the four real profiles (`free`, `micro`, `standard`, `pro`) and read `unknown` as well.
 - The token and cost totals on `attempts` are the one exception to the rule below. Each step updates them in the same transaction that inserts the step, because live cost is needed while the attempt runs (CLI-02, CST-03). A test keeps them equal to `SUM` over `steps`.
-- Repositories exist for `repos`, `tasks`, `attempts` and `steps`. The other tables get theirs in the milestone that first writes them.
+- Repositories exist for `repos`, `tasks`, `attempts` and `steps`. The other tables, `quota_usage` included (first used in M1.11), get theirs in the milestone that first writes them.
+- `cached_tokens` counts cache-hit input tokens, which are priced at `price_cache_hit_per_m`.
 - The views below are not created yet. They arrive as a migration together with the first feature that reads them (baseline report in M0.6, dashboard in M1.9).
 
 ## Derived metrics (as SQL views)
@@ -229,7 +257,14 @@ GROUP BY t.category;
 
 > Note: the join above double-counts when an attempt has several verdicts. The real implementation must aggregate attempts and verdicts in separate subqueries before joining. This is a known trap; cover it with a test.
 
-Other views to implement: `v_success_rate`, `v_escape_rate`, `v_route_stats` (per category × route: n, successes, mean cost — the bandit's input), `v_daily_spend`, `v_counterfactual_savings`.
+Other views to implement: `v_success_rate`, `v_escape_rate`, `v_route_stats` (per category × route: n, successes, mean cost — the bandit's input), `v_daily_spend`, `v_counterfactual_savings`, `v_quota_remaining`, `v_value_per_profile`.
+
+## Migration history
+
+| File | Milestone | Change |
+|---|---|---|
+| `0001_initial.sql` | M0.2 | The v1 tables and indexes. |
+| `0002_budget_profiles.sql` | M0.2.5 | `tasks.profile` and `tasks.deferrable`, `attempts.model_mismatch` and `attempts.deferred_until`, `steps.actual_model`, `steps.price_window`, `steps.price_multiplier` and `steps.price_cache_hit_per_m`, `eval_runs.profile`, `eval_results.quota_wait_s`, and the new `quota_usage` table. Existing rows get the defaults, so tasks and eval runs created before `0002` read `profile = 'unknown'`. |
 
 ## Retention
 
