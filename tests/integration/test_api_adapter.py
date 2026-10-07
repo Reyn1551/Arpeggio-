@@ -777,3 +777,11 @@ def test_error_detail(data: object, expected: str | None) -> None:
     from arpeggio_ai.adapters.api import _error_detail
 
     assert _error_detail(data, FAKE_KEY) == expected
+
+
+def test_step_limit_message_names_the_last_failure(harness: Harness) -> None:
+    run = harness.run(FakeProvider(httpx.ReadTimeout), max_steps=1)
+    assert run.result.final_message == (
+        "step limit reached (1 calls); the last request timed out waiting for a response"
+    )
+    assert run.steps[0].summary == "read timeout; the provider may still bill this request"

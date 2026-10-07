@@ -212,11 +212,15 @@ class ApiAdapter:
                     "max_tokens": spec.max_tokens,
                 }
                 retries = 0
+                last_failure: str | None = None
                 while True:
                     if self._cancelled:
                         raise _Finished("cancelled", "cancelled by the user")
                     if sent >= spec.max_steps:
-                        raise _Finished("timeout", f"step limit reached ({spec.max_steps} calls)")
+                        limit = f"step limit reached ({spec.max_steps} calls)"
+                        if last_failure is not None:
+                            limit += f"; the last request {last_failure}"
+                        raise _Finished("timeout", limit)
                     price, refusal = self._guard(key, messages, spec)
                     if refusal is not None:
                         yield refusal
@@ -252,6 +256,7 @@ class ApiAdapter:
                     )
                     await self._context.sleep(delay)
                     retries += 1
+                    last_failure = outcome.failure
         raise _Finished("completed", reply)
 
     def _check_route(self, spec: AttemptSpec, model: ModelSpec, provider: Provider) -> None:
