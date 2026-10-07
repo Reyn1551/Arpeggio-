@@ -87,6 +87,8 @@ It runs only when all of these hold: you pass `-m live`, `ARPEGGIO_LIVE=1` is se
 
 `ARPEGGIO_LIVE_MAX_TOKENS` sets the output cap for that call. It defaults to 16, and values above 1024 are rejected before anything is sent. Thinking models spend output tokens on reasoning before they answer, so with them set `ARPEGGIO_LIVE_MAX_TOKENS` to at least 512. In `micro-deepseek` that means `tier2.flash` and `tier3.pro`. `tier1.flash` has thinking off and works with the default.
 
+`ARPEGGIO_LIVE_TIMEOUT_S` sets the read timeout per request (default 60 seconds, at most 300). A timed-out request is retried up to 3 times, like any other call, and each timeout is recorded as an estimated step.
+
 `micro-deepseek` profile, bash:
 
 ```bash

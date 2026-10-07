@@ -2,7 +2,8 @@
 
 The live test runs only with ``-m live``, ``ARPEGGIO_LIVE=1``, ``ARPEGGIO_LIVE_MODEL`` set to a
 model key from your config (for example ``tier1.flash``) and that provider's key variable
-set. ``ARPEGGIO_LIVE_MAX_TOKENS`` sets the output cap (default 16, at most 1024). It reads
+set. ``ARPEGGIO_LIVE_MAX_TOKENS`` sets the output cap (default 16, at most 1024) and
+``ARPEGGIO_LIVE_TIMEOUT_S`` the read timeout per request (default 60, at most 300). It reads
 your real config from ``$ARPEGGIO_HOME`` (or ``~/.arpeggio``) and records the call in a
 temporary database, never in your real one. See README.md, "Live smoke test".
 
@@ -19,6 +20,7 @@ from typing import Any
 import pytest
 
 from arpeggio_ai.adapters import registry
+from arpeggio_ai.adapters.api import MAX_RETRIES
 from arpeggio_ai.adapters.base import AdapterContext, AttemptSpec, Route
 from arpeggio_ai.config.loader import load_config
 from arpeggio_ai.core.errors import ConfigError
@@ -39,22 +41,38 @@ from arpeggio_ai.store.repositories import (
 REAL_HOME = os.environ.get("ARPEGGIO_HOME") or str(Path.home() / ".arpeggio")
 MAX_TOKENS_DEFAULT = 16
 MAX_TOKENS_CAP = 1024
+TIMEOUT_S_DEFAULT = 60
+TIMEOUT_S_CAP = 300
+
+
+def _env_int(env: Mapping[str, str], name: str, default: int, cap: int) -> int:
+    raw = env.get(name, "").strip()
+    if not raw:
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        raise ValueError(f"{name} must be a whole number, got {raw!r}") from None
+    if not 1 <= value <= cap:
+        raise ValueError(f"{name} must be between 1 and {cap}, got {value}")
+    return value
 
 
 def live_max_tokens(env: Mapping[str, str]) -> int:
     """``ARPEGGIO_LIVE_MAX_TOKENS`` as an int: default 16, from 1 to 1024."""
-    raw = env.get("ARPEGGIO_LIVE_MAX_TOKENS", "").strip()
-    if not raw:
-        return MAX_TOKENS_DEFAULT
-    try:
-        value = int(raw)
-    except ValueError:
-        raise ValueError(f"ARPEGGIO_LIVE_MAX_TOKENS must be a whole number, got {raw!r}") from None
-    if not 1 <= value <= MAX_TOKENS_CAP:
-        raise ValueError(
-            f"ARPEGGIO_LIVE_MAX_TOKENS must be between 1 and {MAX_TOKENS_CAP}, got {value}"
-        )
-    return value
+    return _env_int(env, "ARPEGGIO_LIVE_MAX_TOKENS", MAX_TOKENS_DEFAULT, MAX_TOKENS_CAP)
+
+
+def live_timeout_s(env: Mapping[str, str]) -> int:
+    """``ARPEGGIO_LIVE_TIMEOUT_S`` (read timeout per request): default 60, from 1 to 300."""
+    return _env_int(env, "ARPEGGIO_LIVE_TIMEOUT_S", TIMEOUT_S_DEFAULT, TIMEOUT_S_CAP)
+
+
+def test_live_timeout_s() -> None:
+    assert live_timeout_s({}) == 60
+    assert live_timeout_s({"ARPEGGIO_LIVE_TIMEOUT_S": "180"}) == 180
+    with pytest.raises(ValueError, match="between 1 and 300, got 301"):
+        live_timeout_s({"ARPEGGIO_LIVE_TIMEOUT_S": "301"})
 
 
 @pytest.mark.parametrize(
@@ -108,6 +126,7 @@ def test_one_tiny_call(home: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         pytest.skip("set ARPEGGIO_LIVE_MODEL to a model key from your config")
     try:
         max_tokens = live_max_tokens(os.environ)
+        timeout_s = live_timeout_s(os.environ)
     except ValueError as error:
         pytest.fail(str(error), pytrace=False)
 
@@ -151,8 +170,8 @@ def test_one_tiny_call(home: Path, monkeypatch: pytest.MonkeyPatch) -> None:
             attempt_id=attempt.id,
             prompt="Reply with the single word: ok",
             route=Route("api", model_key, effort),
-            timeout_s=60,
-            max_steps=1,
+            timeout_s=timeout_s,
+            max_steps=1 + MAX_RETRIES,  # one call, plus the adapter's retries if it needs them
             max_tokens=max_tokens,
         )
         adapter = registry.create("api", AdapterContext(config=config))
@@ -162,16 +181,18 @@ def test_one_tiny_call(home: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     finally:
         conn.close()
 
-    assert result.status == "completed", result.final_message
-    assert len(steps) == 1 and finished is not None
-    step = steps[0]
+    history = "; ".join(f"step {step.seq}: {step.summary}" for step in steps)
+    assert result.status == "completed", f"{result.final_message} ({history or 'no steps'})"
+    assert steps and finished is not None
+    step = steps[-1]  # earlier steps, if any, were retried calls
     assert step.cost_usd is not None and step.cost_usd >= 0
     assert step.actual_model
     assert step.payload_ref is not None
     finish_reason, reasoning = _response_details(json.loads(artifacts.read(step.payload_ref)))
     print(
         f"\nrequested model   {model_key} ({model.model}), effort {effort},"
-        f" max_tokens {max_tokens}"
+        f" max_tokens {max_tokens}, timeout {timeout_s}s"
+        f"\nmodel calls       {len(steps)} (attempt cost ${finished.cost_usd:.8f})"
         f"\nactual_model      {step.actual_model}"
         f"\nmodel_mismatch    {finished.model_mismatch}"
         f"\nfinish_reason     {finish_reason}"
