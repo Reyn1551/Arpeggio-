@@ -19,7 +19,7 @@ from arpeggio_ai.store.db import (
 )
 
 DOCS_SCHEMA = Path(__file__).parents[2] / "docs" / "04-DATA-MODEL.md"
-LATEST = 4
+LATEST = 5
 
 
 def names(conn: sqlite3.Connection, kind: str) -> set[str]:
@@ -447,7 +447,7 @@ def test_v3_database_with_steps_upgrades_to_v4(tmp_path: Path) -> None:
     conn = v1_database(tmp_path / "arpeggio.db")
     try:
         migrate(conn, packaged_migrations()[:3])
-        assert migrate(conn) == [4]
+        assert migrate(conn, packaged_migrations()[:4]) == [4]
         assert columns(conn, "steps")[-2:] == ["provider", "prompt_overhead_tokens"]
         row = conn.execute(
             "SELECT provider, prompt_overhead_tokens FROM steps WHERE id = 'S1'"
@@ -455,5 +455,19 @@ def test_v3_database_with_steps_upgrades_to_v4(tmp_path: Path) -> None:
         assert tuple(row) == (None, None)
         indexes = {r[1] for r in conn.execute("PRAGMA index_list(steps)")}
         assert "idx_steps_provider" in indexes
+    finally:
+        conn.close()
+
+
+def test_v4_database_with_attempts_upgrades_to_v5(tmp_path: Path) -> None:
+    conn = v1_database(tmp_path / "arpeggio.db")
+    try:
+        migrate(conn, packaged_migrations()[:4])
+        assert migrate(conn) == [5]
+        assert columns(conn, "attempts")[-2:] == ["base_sha", "failure_reason"]
+        row = conn.execute(
+            "SELECT model, status, base_sha, failure_reason FROM attempts WHERE id = 'A1'"
+        ).fetchone()
+        assert tuple(row) == ("tier1.cheap", "completed", None, None)
     finally:
         conn.close()

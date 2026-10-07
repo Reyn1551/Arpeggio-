@@ -9,6 +9,7 @@ import json
 import math
 import sqlite3
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Literal, get_args
 
 from arpeggio_ai.config.models import AdapterName, BudgetProfile, Effort, PrivacyClass
@@ -16,6 +17,11 @@ from arpeggio_ai.core.clock import is_utc_timestamp, utc_now
 from arpeggio_ai.core.errors import StoreError
 from arpeggio_ai.core.ids import new_id
 from arpeggio_ai.store.db import transaction
+from arpeggio_ai.verify.criteria import (
+    CommandCriterion,
+    FileExistsCriterion,
+    parse_criterion,
+)
 
 TaskStatus = Literal[
     "intake",
@@ -38,6 +44,8 @@ StepKind = Literal["model_call", "tool_call", "tool_result", "message", "approva
 # Rows created before migration 0002 read profile 'unknown'. New rows never get it.
 StoredProfile = Literal["free", "micro", "standard", "pro", "unknown"]
 PriceWindow = Literal["peak", "offpeak", "flat"]
+CriterionOrigin = Literal["user", "derived"]
+VerdictKind = Literal["check", "full_suite", "model_review", "user_review"]
 
 FINAL_TASK_STATUSES = frozenset({"merged", "failed", "rejected", "cancelled"})
 FINAL_ATTEMPT_STATUSES = frozenset({"completed", "timeout", "error", "cancelled"})
@@ -100,6 +108,33 @@ class Attempt:
     checkpoint: dict[str, Any] | None
     model_mismatch: bool
     deferred_until: str | None
+    base_sha: str | None
+    failure_reason: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class Criterion:
+    id: str
+    task_id: str
+    kind: str
+    spec: dict[str, Any]
+    origin: CriterionOrigin
+
+    def parsed(self) -> "CommandCriterion | FileExistsCriterion":
+        return parse_criterion(self.spec)
+
+
+@dataclass(frozen=True, slots=True)
+class Verdict:
+    id: str
+    attempt_id: str
+    criterion_id: str | None
+    kind: VerdictKind
+    passed: bool
+    detail: dict[str, Any] | None
+    log_ref: str | None
+    cost_usd: float
+    created_at: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -164,6 +199,14 @@ def _attempt(row: sqlite3.Row) -> Attempt:
     )
 
 
+def _criterion(row: sqlite3.Row) -> Criterion:
+    return Criterion(**_row(row, json_cols=("spec",)))
+
+
+def _verdict(row: sqlite3.Row) -> Verdict:
+    return Verdict(**_row(row, json_cols=("detail",), bool_cols=("passed",)))
+
+
 def _step(row: sqlite3.Row) -> Step:
     return Step(**_row(row, bool_cols=("cost_estimated",)))
 
@@ -198,6 +241,25 @@ def ensure_repo(
         )
         row = conn.execute("SELECT * FROM repos WHERE path = ?", (path,)).fetchone()
     return _repo(row)
+
+
+def register_repo(
+    conn: sqlite3.Connection,
+    path: Path,
+    name: str | None = None,
+    privacy_class: PrivacyClass = "private",
+    provider_allow: list[str] | None = None,
+) -> Repo:
+    """Register a repository by its absolute, resolved path. Idempotent."""
+    if not path.is_absolute():
+        raise StoreError(f"repo path must be absolute: {path}")
+    resolved = path.resolve()
+    return ensure_repo(conn, str(resolved), name or resolved.name, privacy_class, provider_allow)
+
+
+def get_repo(conn: sqlite3.Connection, repo_id: str) -> Repo | None:
+    row = conn.execute("SELECT * FROM repos WHERE id = ?", (repo_id,)).fetchone()
+    return None if row is None else _repo(row)
 
 
 # Tasks
@@ -373,6 +435,103 @@ def set_deferred_until(conn: sqlite3.Connection, attempt_id: str, until: str | N
     if until is not None and not is_utc_timestamp(until):
         raise StoreError(f"deferred_until must look like 2026-10-07T01:00:00.000Z: {until!r}")
     return _update_attempt(conn, attempt_id, "deferred_until", until)
+
+
+def set_attempt_worktree(
+    conn: sqlite3.Connection, attempt_id: str, worktree: str, branch: str, base_sha: str
+) -> Attempt:
+    """Record where an attempt runs: its worktree, branch and starting commit (EXE-04)."""
+    with transaction(conn):
+        updated = conn.execute(
+            "UPDATE attempts SET worktree = ?, branch = ?, base_sha = ? WHERE id = ?",
+            (worktree, branch, base_sha, attempt_id),
+        ).rowcount
+    if updated == 0:
+        raise StoreError(f"unknown attempt {attempt_id}")
+    return _get_attempt(conn, attempt_id)
+
+
+def set_failure_reason(conn: sqlite3.Connection, attempt_id: str, reason: str) -> Attempt:
+    """Why an attempt failed before verification, for example ``patch_unsafe``."""
+    if not reason:
+        raise StoreError("failure reason must not be empty")
+    return _update_attempt(conn, attempt_id, "failure_reason", reason)
+
+
+# Done criteria and verdicts
+
+
+def add_criterion(
+    conn: sqlite3.Connection,
+    task_id: str,
+    spec: object,
+    origin: CriterionOrigin = "user",
+) -> Criterion:
+    """Validate ``spec`` (see verify/criteria.py) and store it for the task."""
+    _require("criterion origin", origin, CriterionOrigin)
+    parsed = parse_criterion(spec)
+    criterion_id = new_id()
+    try:
+        with transaction(conn):
+            conn.execute(
+                "INSERT INTO done_criteria (id, task_id, kind, spec, origin)"
+                " VALUES (?, ?, ?, ?, ?)",
+                (criterion_id, task_id, parsed.kind, _dumps(parsed.model_dump()), origin),
+            )
+    except sqlite3.IntegrityError as error:
+        raise StoreError(f"cannot add criterion (unknown task?): {error}") from error
+    row = conn.execute("SELECT * FROM done_criteria WHERE id = ?", (criterion_id,)).fetchone()
+    return _criterion(row)
+
+
+def list_criteria(conn: sqlite3.Connection, task_id: str) -> list[Criterion]:
+    """A task's criteria in the order they were added."""
+    rows = conn.execute("SELECT * FROM done_criteria WHERE task_id = ? ORDER BY rowid", (task_id,))
+    return [_criterion(row) for row in rows]
+
+
+def add_verdict(
+    conn: sqlite3.Connection,
+    attempt_id: str,
+    *,
+    kind: VerdictKind,
+    passed: bool,
+    criterion_id: str | None = None,
+    detail: dict[str, Any] | None = None,
+    log_ref: str | None = None,
+    cost_usd: float = 0.0,
+) -> Verdict:
+    """Store the result of one check (VER-04)."""
+    _require("verdict kind", kind, VerdictKind)
+    if not math.isfinite(cost_usd) or cost_usd < 0:
+        raise StoreError(f"cost_usd must be >= 0: {cost_usd!r}")
+    verdict_id = new_id()
+    try:
+        with transaction(conn):
+            conn.execute(
+                "INSERT INTO verdicts (id, attempt_id, criterion_id, kind, passed, detail,"
+                " log_ref, cost_usd, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    verdict_id,
+                    attempt_id,
+                    criterion_id,
+                    kind,
+                    int(passed),
+                    _dumps(detail),
+                    log_ref,
+                    cost_usd,
+                    utc_now(),
+                ),
+            )
+    except sqlite3.IntegrityError as error:
+        raise StoreError(f"cannot add verdict (unknown attempt or criterion?): {error}") from error
+    row = conn.execute("SELECT * FROM verdicts WHERE id = ?", (verdict_id,)).fetchone()
+    return _verdict(row)
+
+
+def list_verdicts(conn: sqlite3.Connection, attempt_id: str) -> list[Verdict]:
+    rows = conn.execute("SELECT * FROM verdicts WHERE attempt_id = ? ORDER BY rowid", (attempt_id,))
+    return [_verdict(row) for row in rows]
 
 
 # Steps
