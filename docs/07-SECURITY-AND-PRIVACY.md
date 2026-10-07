@@ -38,7 +38,9 @@ Approval decisions are per action and per attempt. An approval never generalizes
 
 ## Secrets
 
-- API keys load from environment variables or the OS keychain (`env:VAR` or `keychain:name` in config). Inline keys in config fail validation.
+- API keys load from environment variables or the OS keychain (`env:VAR` or `keychain:name` in config). Inline keys in config fail validation. Only `env:` works today, and `keychain:` references report "not supported yet".
+- A key is resolved when a request is about to be sent, held as a `SecretStr`, and placed only in the `Authorization` header. Logs, error messages, artifacts and database rows never contain it, and error messages name the variable only. Request and response bodies go to artifacts, never to logs. An integration test plants a fake key and searches every artifact, log line and database text column for it ([ADR-0007](adr/0007-httpx-and-first-network-calls.md)).
+- Tests never reach the network. The one live smoke test is opt-in (`-m live` with `ARPEGGIO_LIVE=1`).
 - Default exclusions from agent context: `.env*`, `*.pem`, `*.key`, `id_*`, `*credentials*`, `secrets.*`, cloud CLI config dirs.
 - A secret scanner (regex + entropy) runs on: outgoing prompts built by Arpeggio, tool outputs before persistence, and diffs before merge approval. Matches are redacted (`[REDACTED:<type>]`) and logged as events.
 - Adapters that call external CLIs pass only the environment variables those CLIs need.

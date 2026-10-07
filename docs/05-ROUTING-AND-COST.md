@@ -207,6 +207,20 @@ cost = ( (input_tokens − cached_tokens) × price_in_per_m
 
 `cached_tokens` counts the input tokens the provider served from its cache. `multiplier` is `offpeak_multiplier` when the call starts outside every peak window, and 1 otherwise. Each step records the prices it used, the window (`peak`, `offpeak` or `flat`) and the multiplier, so history never depends on today's prices.
 
+The window is the one in effect when the request starts, in UTC. A window's start time is inclusive and its end time exclusive, so with `Mon-Fri 01:00-04:00` a call at 01:00 is peak and one at 04:00 is off-peak. A call that starts at 03:59 and ends after 04:00 is billed at the peak price. Free models and loopback providers cost 0. Costs are computed exactly in decimal and stored rounded to 8 decimal places.
+
+Token counts come from the response. Providers report cache hits in two shapes: DeepSeek's `usage.prompt_cache_hit_tokens` (with `prompt_cache_miss_tokens`) and OpenAI's `usage.prompt_tokens_details.cached_tokens`. When both are present, the DeepSeek field wins. Without usable usage, input and output tokens are estimated as `ceil(characters / 4)` and the step is marked `cost_estimated` (CST-02). The same mark is set when a reported cache-hit count falls outside `0..input_tokens` and has to be clamped.
+
+### Spend guard
+
+Before every request (`cost/guard.py`):
+
+1. A model whose provider id is still a template placeholder (`<...>`) is refused: "model <key> still has a placeholder id; edit your config".
+2. Under the `free` profile, a model that is neither `free = true` nor on a loopback provider is refused (BUD-02).
+3. The worst case for the call (estimated prompt tokens, no cache hits, `max_tokens` output, at the current window) must not exceed `per_task_usd` minus what the attempt has spent so far. Equal is allowed.
+
+A refused call sends nothing. It is recorded as a `message` step with cost 0, and the attempt pauses. Budgets across tasks, days and months (CST-03) and the prepaid balance check (BUD-03) come later, in M1.4 and M1.11.
+
 Deferrable work (CST-10: eval runs, reflection, distillation, shadow evaluation) is scheduled into the cheapest upcoming window when the provider declares peak windows.
 
 ## Quota governor
