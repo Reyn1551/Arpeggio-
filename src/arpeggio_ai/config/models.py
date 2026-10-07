@@ -91,6 +91,22 @@ def peak_window_problem(window: str) -> str | None:
     return None
 
 
+def peak_window_bounds(window: str) -> tuple[int, int, int, int]:
+    """``"Mon-Fri 01:00-04:00"`` -> (first day, last day, start minute, end minute).
+
+    Days count from Monday = 0 like ``datetime.weekday()``. The end minute is exclusive and
+    may be 1440 (``24:00``). Raises ValueError on a window that would fail validation.
+    """
+    match = _PEAK_WINDOW.fullmatch(window)
+    if match is None or peak_window_problem(window) is not None:
+        raise ValueError(f"invalid peak window: {window!r}")
+    first = _DAYS.index(match["first"])
+    last = _DAYS.index(match["last"]) if match["last"] else first
+    start = int(match["h1"]) * 60 + int(match["m1"])
+    end = int(match["h2"]) * 60 + int(match["m2"])
+    return first, last, start, end
+
+
 def _raise_if_any(title: str, problems: list[tuple[Loc, str]]) -> None:
     """Raise one ValidationError holding every problem, each at its own field location.
 
