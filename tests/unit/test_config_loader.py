@@ -18,9 +18,10 @@ def load_issues(repo: Path | None = None) -> list[ConfigIssue]:
 
 
 def test_example_config_bytes_is_the_packaged_template(template_text: str) -> None:
-    raw = example_config_bytes()
-    assert raw.decode("utf-8") == template_text
-    parse_config(tomllib.loads(raw.decode("utf-8")))
+    text = example_config_bytes().decode("utf-8")
+    # Compare lines: a Windows checkout with core.autocrlf stores the template with CRLF.
+    assert text.splitlines() == template_text.splitlines()
+    parse_config(tomllib.loads(text))
 
 
 def test_loads_global_config(write_global: WriteFile, template_text: str) -> None:
