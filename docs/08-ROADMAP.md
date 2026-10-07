@@ -32,7 +32,7 @@ Goal: Arpeggio handles real daily tasks more cheaply than the `middle` baseline,
 | M1.3 Risk + rule router | Signal-based risk, policy file, escalation, provider fallback, single-provider mode | RTE-01..06, RTE-12 |
 | M1.4 Cost governor | Budgets, loop detection, context diet, counterfactual cost | CST-03..06 |
 | M1.5 Safety | Approval gate, command policy, secret scanner, privacy classes | SAF-01..06 |
-| M1.6 Checkpoint & resume | Resumable attempts, timeouts, step limits | EXE-05, EXE-06 |
+| M1.6 Checkpoint & resume | Resumable attempts, timeouts, step limits. Exhausted retries pause the attempt instead of ending it with `error` | EXE-05, EXE-06, RTE-12 |
 | M1.7 Feedback capture | Post-agent diff, interventions, rating | LRN-01 |
 | M1.8 CLI complete | `run`, `status`, `approve`, `reject`, `replay`, `stats`, `--json` | CLI-01..03, OBS-02 |
 | M1.9 Dashboard v1 | One page: tasks, routes, verdicts, cost, savings, strategy comparison | DSH-01, DSH-02 |

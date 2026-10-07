@@ -54,7 +54,7 @@
 | RTE-09 | P1 | The system SHOULD run **shadow evaluation**: a configurable share of cheap-routed tasks is also run on a frontier route, outside the user's flow, and compared. | Shadow results are stored and excluded from user-facing output. |
 | RTE-10 | P2 | The router MAY run a **tournament**: the same task on N routes in parallel worktrees, with the verifier choosing the winner. | Tournament mode produces N attempts and one selected result. |
 | RTE-11 | P0 | Gateways are providers with `gateway = true`. For every call the system MUST record the model that actually served it (from the response) and flag a mismatch with the requested model. Mismatched attempts are excluded from router learning. | Recorded fixture with a mismatch is flagged and excluded. |
-| RTE-12 | P0 | Single-provider operation MUST be fully supported: provider fallback degrades to retry-with-backoff, then pause. | Integration test with exactly one provider. |
+| RTE-12 | P0 | Single-provider operation MUST be fully supported: provider fallback degrades to retry-with-backoff, then pause. Note: until resumable attempts exist (M1.6), exhausted retries end the attempt with status `error`. M1.6 changes this to `paused`. | Integration test with exactly one provider. |
 
 ### Cost governor (CST)
 
