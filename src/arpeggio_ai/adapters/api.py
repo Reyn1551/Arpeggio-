@@ -190,7 +190,8 @@ class ApiAdapter:
                     price, refusal = self._guard(key, messages, spec)
                     if refusal is not None:
                         yield refusal
-                        raise _Finished("paused", refusal.summary)
+                        reason = refusal.payload["spend_refused"]
+                        raise _Finished("paused", f"spend guard: {reason}")
                     assert price is not None
                     if headers is None:
                         headers = self._headers(model.provider, provider)

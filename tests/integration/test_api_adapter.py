@@ -447,7 +447,7 @@ def refused(run: Run) -> None:
     assert (run.result.status, run.attempt.status) == ("paused", "paused")
     [step] = run.steps
     assert (step.kind, step.cost_usd, step.input_tokens) == ("message", 0.0, None)
-    assert step.summary == f"spend guard: {run.result.final_message.removeprefix('spend guard: ')}"
+    assert run.result.final_message == step.summary  # short reasons fit the summary whole
 
 
 def test_placeholder_model_is_refused(harness: Harness) -> None:
