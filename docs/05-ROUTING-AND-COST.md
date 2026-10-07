@@ -4,6 +4,35 @@ The router answers *"which route is most likely to succeed at the lowest total c
 
 A **route** is `(adapter, model, effort, verification_depth)`. Effort is a routing dimension of its own: a mid-tier model at low effort is often enough for easy work and much cheaper than the same model at high effort.
 
+## Budget profiles
+
+Arpeggio runs the same pipeline at every budget. The profile (`budget.profile` in config, stored on every task) decides which routes exist, how high quality can go, and how fast work gets done. It never switches a feature off without a $0 alternative (BUD-04, [ADR-0005](adr/0005-budget-profiles.md)).
+
+| Profile | Typical user | Allowed routes | Verification `full` means | Shadow / tournament |
+|---|---|---|---|---|
+| `free` | $0 | Free-tier and local models only | Full test suite + all static checks | Disabled |
+| `micro` | ≤ ~$5 prepaid on one provider | Cheapest provider models, free tiers first for low risk | Full suite + review by the strongest configured model | Shadow ≤ 2% of tasks, capped by balance |
+| `standard` | Regular paid usage | All configured | As currently specified | As currently specified |
+| `pro` | Multiple paid providers / subscriptions via official clients | All configured | As currently specified | Enabled |
+
+### Feature degradation matrix
+
+Every feature works under every profile. Where a feature costs money, the `free` column names its $0 version.
+
+| Feature | `free` | `micro` | `standard` | `pro` |
+|---|---|---|---|---|
+| Intake | Strongest free model, within its quota | Cheapest model, thinking off | `tier1` | `tier1` |
+| Routing | Rules over free and local models only, never a paid route (BUD-02, QTA-03) | Rules, free tiers first for low risk, every call checked against the remaining balance (BUD-03) | Rules in v1, bandit in v2 | Same as `standard` |
+| Cascade | Between free models only | Within one provider (for example flash to pro), only above break-even | As specified (CST-09) | As specified |
+| Verification | `full` = full suite + all static checks, no model review (VER-02) | `full` = full suite + review by the strongest configured model | As specified (VER-02) | As specified |
+| Reflection | Failure classes from verdicts and logs, plus a free model when quota is left, deferred | Cheapest model, deferred to the cheapest price window | Batch API where available | Same as `standard` |
+| Taste | Distilled from diffs by a free model, deferred | Cheapest model, deferred | As specified | As specified |
+| Shadow evaluation | Disabled | ≤ 2% of tasks, capped by balance | As specified | Enabled |
+| Tournament | Disabled | Disabled | Manual only, never automatic | Manual, enabled |
+| Eval runs | Free models, deferred, quota waits reported | Deferred to off-peak, capped by balance | As specified | As specified |
+
+"As specified" means the behavior described in the rest of this document.
+
 ## Model tiers
 
 Tiers are logical. Concrete models and prices live in config and change over time.
@@ -132,6 +161,62 @@ where `p` is the cheap route's measured success rate for that category, and cost
 
 - Cascade is allowed only for categories whose done criteria include real tests (`kind = command` with a test runner).
 - In v2, the policy auto-disables cascade for a category when `p` (lower confidence bound) falls below the break-even ratio.
+
+## Pricing model
+
+Prices are data, not code (NFR-12). Each model in config declares three prices per million tokens: input (cache miss), cache-hit input, and output. A provider may also declare peak windows in UTC with an off-peak multiplier. Prices in config are always the **peak** prices. Providers without windows have flat pricing (multiplier 1).
+
+Cost of one call (CST-11):
+
+```
+cost = ( (input_tokens − cached_tokens) × price_in_per_m
+       + cached_tokens × price_cache_hit_in_per_m
+       + output_tokens × price_out_per_m ) / 1,000,000 × multiplier
+```
+
+`cached_tokens` counts the input tokens the provider served from its cache. `multiplier` is `offpeak_multiplier` when the call starts outside every peak window, and 1 otherwise. Each step records the prices it used, the window (`peak`, `offpeak` or `flat`) and the multiplier, so history never depends on today's prices.
+
+Deferrable work (CST-10: eval runs, reflection, distillation, shadow evaluation) is scheduled into the cheapest upcoming window when the provider declares peak windows.
+
+## Quota governor
+
+Free tiers come with per-minute and per-day caps that differ per model and change without notice.
+
+- Models may declare `limits` (`rpm`, `rpd`, `tpm`, `tpd`). Arpeggio counts usage locally per minute and per day (QTA-01).
+- When a response carries rate-limit headers, the headers win over the configured values (QTA-02).
+- On HTTP 429 or an exhausted quota (QTA-03), the router waits if the reset is at most `max_quota_wait_s` away (default 120 s). Otherwise it switches to another allowed route of equal or lower cost, or pauses the task. Under `free` it never switches to a paid route.
+- One provider is one account. Config rejects two providers with the same kind and endpoint (QTA-04).
+
+## Single-provider mode (DeepSeek example)
+
+A `micro` user often has credit on one provider only. Single-provider operation is fully supported (RTE-12): provider fallback becomes retry with backoff, then pause. The three tiers come from one provider's models and thinking modes:
+
+| Tier | Route |
+|---|---|
+| `tier1.flash` | `deepseek-flash`, thinking off |
+| `tier2.flash` | `deepseek-flash`, thinking on |
+| `tier3.pro` | `deepseek-v4-pro`, thinking on |
+
+Prices last verified 2026-10-07 on the [DeepSeek pricing page](https://api-docs.deepseek.com/quick_start/pricing). They change, so treat them as data to re-check, not as constants. Per million tokens at peak: flash costs $0.30 input, $0.006 cache-hit input and $1.20 output. Pro costs $1.32, $0.044 and $3.96.
+
+**Cascade break-even.** Pro costs 3.3× (output) to 4.4× (input) as much as flash. Using `p > c_cheap / c_expensive` from [When cascade pays off](#when-cascade-pays-off), trying flash first pays off once flash's measured success rate for a category is above roughly 23-30%. Thinking mode changes output volume a lot, so measure the real ratio per category instead of trusting the price ratio.
+
+**Off-peak deferral.** Peak hours are 01:00-04:00 and 06:00-10:00 UTC, Monday to Friday, which is 08:00-11:00 and 13:00-17:00 in UTC+7. Off-peak calls cost 50% of peak. DeepSeek excludes Chinese public holidays from peak, but Arpeggio treats them as peak, which errs on the expensive side. Deferrable work waits for the next off-peak window.
+
+## Gateways and free tiers
+
+Gateways (OpenRouter, 9Router, LiteLLM and similar) and local servers are configured as ordinary `openai_compatible` providers ([ADR-0006](adr/0006-gateways-and-free-tier-ethics.md)).
+
+- Set `gateway = true` on gateways. Every call records the model that actually answered. A mismatch with the requested model, after `response_model_aliases`, is flagged, and that attempt is kept out of router learning (RTE-11, CFG-10).
+- Turn off gateway-side fallback, or pin the model. Arpeggio never relies on it for learning data.
+- Every provider declares `data_use`. `private` and `client` repos only use providers marked `no_training`, unless the repo sets `allow_training_providers = true` (SAF-07). A gateway is a provider of its own for this check, and the stricter of gateway and upstream applies (SAF-08).
+
+What Arpeggio will not do:
+
+- Rotate several accounts or keys for the same provider (QTA-04).
+- Use reverse-engineered or MITM endpoints, or scrape web UIs.
+- Reuse subscription credentials outside the provider's official clients.
+- Depend on gateway features that do any of the above.
 
 ## Learned router (v2): contextual bandit
 

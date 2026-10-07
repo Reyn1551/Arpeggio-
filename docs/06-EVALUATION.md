@@ -91,6 +91,12 @@ arpeggio eval run --strategy all --split holdout --repeats 3
 
 Report (CLI and dashboard): per strategy, success rate, cost per solved task, escalations, retries, escape proxies (hidden test failures), with 95% confidence intervals. Claims compare against `middle`, never only against `junior`.
 
+### Per-profile baselines
+
+The four strategies run under at least the `free` and `micro` profiles (EVL-06). Per profile, the report gives solved tasks, cost, wall-clock time, and time spent waiting on quotas. Under `free`, `junior` means the strongest free model available, since there is no paid frontier model to use.
+
+Eval runs are deferrable (CST-10): when a provider declares peak windows, they run in the cheapest upcoming window.
+
 ## Statistics
 
 - Agent runs are noisy. Each task runs `--repeats 3` (≥ 5 for gate decisions on small suites).
@@ -111,7 +117,7 @@ Every proposal (policy, taste, skill, prompt, router weights) and every change t
 4. Pass → proposal status `accepted`, merged with the eval run ID in the commit message.
 5. Fail → `rejected`, with the report attached so the reflector can learn from it.
 
-Gate runs cost money. Budget them explicitly (`[budget] eval_per_month_usd`) and run them through batch APIs where possible.
+Gate runs cost money. Budget them explicitly (a planned `eval_per_month_usd` budget field, not in the config schema yet) and run them through batch APIs where possible.
 
 ## Anti-gaming rules
 
