@@ -1,5 +1,6 @@
-"""`arpeggio init`: create the home directory, runtime subdirectories and a starter config."""
+"""`arpeggio init`: create the home, runtime subdirectories, a starter config and the database."""
 
+import logging
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -11,9 +12,13 @@ from rich.text import Text
 from arpeggio_ai.cli.output import JSON_HELP, console, emit_json, json_mode, run_command
 from arpeggio_ai.config.loader import example_config_bytes
 from arpeggio_ai.core.errors import ArpeggioError
-from arpeggio_ai.paths import RUNTIME_SUBDIRS, arpeggio_home, global_config_path
+from arpeggio_ai.core.logs import configure_logging
+from arpeggio_ai.paths import RUNTIME_SUBDIRS, arpeggio_home, db_path, global_config_path, logs_dir
+from arpeggio_ai.store.db import open_db
 
 DIR_MODE = 0o700
+
+log = logging.getLogger(__name__)
 
 
 @dataclass
@@ -67,6 +72,19 @@ def initialize(home: Path, force: bool) -> InitResult:
         with config_path.open("xb") as handle:
             handle.write(example_config_bytes())
         result.created.append(str(config_path))
+
+    # Opening the database creates it if needed and applies pending migrations. An existing
+    # database keeps its data: --force only ever touches config.toml.
+    configure_logging(logs_dir(home))
+    database = db_path(home)
+    existed = database.exists()
+    open_db(database).close()
+    (result.skipped if existed else result.created).append(str(database))
+
+    log.info(
+        "init.completed",
+        extra={"created_count": len(result.created), "skipped_count": len(result.skipped)},
+    )
     return result
 
 
@@ -98,7 +116,7 @@ def init_command(
     ] = False,
     json_flag: Annotated[bool, typer.Option("--json", help=JSON_HELP)] = False,
 ) -> None:
-    """Create the Arpeggio home directory and a starter config.toml. Safe to run again."""
+    """Create the Arpeggio home, a starter config.toml and the database. Safe to run again."""
     as_json = json_mode(ctx, json_flag)
     result = run_command(as_json, lambda: initialize(arpeggio_home(), force))
     if as_json:

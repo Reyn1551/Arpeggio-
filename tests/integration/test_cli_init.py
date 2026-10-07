@@ -1,6 +1,7 @@
 import json
 import os
 import re
+import sqlite3
 import stat
 import sys
 from datetime import UTC, datetime
@@ -13,6 +14,9 @@ from typer.testing import CliRunner
 from arpeggio_ai.cli.app import app
 from arpeggio_ai.cli.commands import init as init_module
 from arpeggio_ai.config.loader import example_config_bytes, load_config
+from arpeggio_ai.core.logs import close_logging
+from arpeggio_ai.store.db import open_db
+from arpeggio_ai.store.repositories import create_task, ensure_repo
 
 runner = CliRunner()
 SUBDIRS = ["artifacts", "worktrees", "taste", "skills", "logs"]
@@ -24,8 +28,20 @@ def init_json(*extra: str) -> tuple[int, dict[str, Any]]:
     return result.exit_code, json.loads(result.stdout)
 
 
+def dir_paths(home: Path) -> list[str]:
+    return [str(home), *(str(home / name) for name in SUBDIRS)]
+
+
 def all_paths(home: Path) -> list[str]:
-    return [str(home), *(str(home / name) for name in SUBDIRS), str(home / "config.toml")]
+    return [*dir_paths(home), str(home / "config.toml"), str(home / "arpeggio.db")]
+
+
+def schema_version(path: Path) -> int:
+    conn = sqlite3.connect(path)
+    try:
+        return int(conn.execute("SELECT MAX(version) FROM schema_version").fetchone()[0])
+    finally:
+        conn.close()
 
 
 def test_init_creates_home_subdirs_and_config(home: Path) -> None:
@@ -41,6 +57,7 @@ def test_init_creates_home_subdirs_and_config(home: Path) -> None:
     }
     assert all((home / name).is_dir() for name in SUBDIRS)
     assert (home / "config.toml").read_bytes() == example_config_bytes()
+    assert schema_version(home / "arpeggio.db") == 1
     load_config()
 
 
@@ -67,7 +84,9 @@ def test_init_is_idempotent(home: Path) -> None:
     assert payload["skipped"] == all_paths(home)
     assert payload["backup"] is None
     assert (home / "config.toml").read_text(encoding="utf-8") == "# my edits\n"
-    assert sorted(p.name for p in home.iterdir()) == sorted([*SUBDIRS, "config.toml"])
+    assert sorted(p.name for p in home.iterdir()) == sorted(
+        [*SUBDIRS, "config.toml", "arpeggio.db"]
+    )
 
 
 def test_force_backs_up_existing_config_and_writes_fresh_one(home: Path) -> None:
@@ -83,7 +102,7 @@ def test_force_backs_up_existing_config_and_writes_fresh_one(home: Path) -> None
     assert backup.read_text(encoding="utf-8") == "# my edits\n"
     assert (home / "config.toml").read_bytes() == example_config_bytes()
     assert payload["created"] == [str(home / "config.toml")]
-    assert payload["skipped"] == all_paths(home)[:-1]
+    assert payload["skipped"] == [*dir_paths(home), str(home / "arpeggio.db")]
 
 
 def test_force_without_existing_config_makes_no_backup(home: Path) -> None:
@@ -158,3 +177,70 @@ def test_init_help() -> None:
     assert result.exit_code == 0
     assert "--force" in result.stdout
     assert "--json" in result.stdout
+
+
+# Database (OBS-01) and logs (OBS-03)
+
+
+def test_deleting_the_database_and_rerunning_init_gives_a_working_empty_system(home: Path) -> None:
+    init_json()
+    conn = open_db(home / "arpeggio.db")
+    ensure_repo(conn, "/code/app", "app")
+    conn.close()
+
+    (home / "arpeggio.db").unlink()
+    code, payload = init_json()
+
+    assert code == 0
+    assert payload["created"] == [str(home / "arpeggio.db")]
+    conn = open_db(home / "arpeggio.db")
+    try:
+        assert conn.execute("SELECT COUNT(*) FROM repos").fetchone()[0] == 0
+        repo = ensure_repo(conn, "/code/app", "app")
+        assert create_task(conn, repo.id, "t", "t").status == "intake"
+    finally:
+        conn.close()
+
+
+def test_force_keeps_existing_database_rows(home: Path) -> None:
+    init_json()
+    conn = open_db(home / "arpeggio.db")
+    ensure_repo(conn, "/code/app", "app")
+    conn.close()
+
+    code, payload = init_json("--force")
+
+    assert code == 0
+    assert str(home / "arpeggio.db") in payload["skipped"]
+    conn = open_db(home / "arpeggio.db")
+    try:
+        assert conn.execute("SELECT COUNT(*) FROM repos").fetchone()[0] == 1
+    finally:
+        conn.close()
+
+
+def test_init_writes_json_lines_log(home: Path) -> None:
+    init_json()
+    init_json()
+    close_logging()
+    (log_file,) = (home / "logs").iterdir()
+    entries = [json.loads(line) for line in log_file.read_text(encoding="utf-8").splitlines()]
+    assert [e["event"] for e in entries] == ["store.migrated", "init.completed", "init.completed"]
+    assert entries[0]["from_version"] == 0
+    assert entries[0]["to_version"] == 1
+    assert entries[1]["created_count"] == 8
+    assert entries[2]["skipped_count"] == 8
+
+
+def test_newer_database_schema_is_an_error(home: Path) -> None:
+    init_json()
+    conn = sqlite3.connect(home / "arpeggio.db")
+    conn.execute("INSERT INTO schema_version (version, applied_at) VALUES (99, 'x')")
+    conn.commit()
+    conn.close()
+
+    result = runner.invoke(app, ["init", "--json"])
+
+    assert result.exit_code == 1
+    message = json.loads(result.stdout)["errors"][0]["message"]
+    assert message.startswith("StoreError: database schema version 99 is newer")
