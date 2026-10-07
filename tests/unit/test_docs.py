@@ -256,6 +256,19 @@ def test_templates_state_behavioral_defaults_explicitly(name: str) -> None:
     assert {"reserve_usd", "overhead_alert", "max_quota_wait_s"} <= set(budget)
 
 
+def test_m04_requirements_and_fields_are_documented() -> None:
+    requirements = (DOCS / "02-REQUIREMENTS.md").read_text(encoding="utf-8")
+    assert (
+        "| EXE-08 | P0 | The `api` adapter MUST support patch mode: the model returns exactly one"
+        " unified diff, which is validated and applied in the attempt worktree before"
+        " verification. Invalid, unsafe, or non-applying patches end the attempt as failed with"
+        " a stored reason. | Integration tests cover apply, conflict, unsafe path, and malformed"
+        " output. |"
+    ) in requirements
+    reference = (DOCS / "05-ROUTING-AND-COST.md").read_text(encoding="utf-8")
+    assert "| `check_env` | list of strings |" in reference
+
+
 def test_every_template_says_what_it_expects() -> None:
     for name in TEMPLATES:
         header = template_bytes(name).decode("utf-8").split("\n\n", 1)[0]

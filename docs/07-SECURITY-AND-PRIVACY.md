@@ -24,6 +24,12 @@ Arpeggio runs agents that execute shell commands on the user's machine and send 
 - The agent's working directory is the worktree. Writes outside it are denied by policy and, when `sandbox = "container"`, by the container mount itself.
 - Container mode (v1 optional, v2 recommended for `client` repos): only the worktree is mounted read-write; network egress limited to the provider endpoints and package registries in an allowlist.
 
+### What patch mode does not isolate
+
+In single-shot patch mode ([ADR-0008](adr/0008-single-shot-patch-executor.md)) the done criteria execute code the model wrote, with your user's filesystem permissions. Arpeggio checks the diff before applying it (paths, `.git`, symlinks, binary data, size) and scrubs the environment of checks, but it does not restrict what a test file does on disk or on the network. Run patch mode only on repositories and tasks where that is acceptable until the container sandbox (EXE-07) exists.
+
+On timeout a check's process tree is killed. On POSIX this is the process group, so only a child that starts its own session escapes. On Windows `taskkill /T` walks the tree by parent PID, so a grandchild whose parent already exited can survive.
+
 ## Command policy
 
 Three classes, configurable per repo:
@@ -44,6 +50,7 @@ Approval decisions are per action and per attempt. An approval never generalizes
 - Default exclusions from agent context: `.env*`, `*.pem`, `*.key`, `id_*`, `*credentials*`, `secrets.*`, cloud CLI config dirs.
 - A secret scanner (regex + entropy) runs on: outgoing prompts built by Arpeggio, tool outputs before persistence, and diffs before merge approval. Matches are redacted (`[REDACTED:<type>]`) and logged as events.
 - Adapters that call external CLIs pass only the environment variables those CLIs need.
+- Done-criteria checks and Arpeggio's git commands start from an allowlist, never from your full environment: `PATH`, `HOME`, `USERPROFILE`, `TEMP`, `TMP`, `TMPDIR`, `LANG`, `LC_ALL`, and on Windows `SYSTEMROOT`, `COMSPEC` and `PATHEXT`, plus the names in `[repo] check_env`. Every variable that a provider `api_key` references is removed, even when `check_env` lists it (SAF-02).
 
 ## Prompt injection
 
