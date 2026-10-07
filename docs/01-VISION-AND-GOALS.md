@@ -2,7 +2,7 @@
 
 ## Vision
 
-One workbench where every coding agent and model works for one person: at the lowest possible cost, with verified quality, and with capability that keeps rising because it learns from that person's real work.
+One workbench where every coding agent and model works for one person: at the lowest possible cost, with verified quality, and with capability that keeps rising because it learns from that person's real work, at any budget, including zero.
 
 The test sentence: **every month, Arpeggio completes more tasks correctly, more cheaply, and with less human intervention than the month before, and proves it with numbers.**
 
@@ -17,6 +17,10 @@ The primary user is a single developer (the repo owner) who works across several
 
 The design must not lock Arpeggio into one domain. Domain-specific behavior enters through **domain packs**.
 
+## Who it is for
+
+The owner comes first. The second audience is students and developers in the international community who have $0 to $5 a month to spend on models. For them the free and micro profiles have to be complete, not trial versions of the paid ones.
+
 ## Goals
 
 | ID | Goal | Success measure |
@@ -28,6 +32,7 @@ The design must not lock Arpeggio into one domain. Domain-specific behavior ente
 | G5 | **Taste belongs to the user.** Style preferences are extracted from real diffs and exported to every agent. | Post-agent edits (lines the user still changes) decline over time. |
 | G6 | **Transparent and auditable.** Every task can be replayed step by step, with its cost. | 100% of attempts have a trace and a recorded cost. |
 | G7 | **Safe by default.** Agents cannot take irreversible actions without approval. | Zero unapproved destructive actions in the logs. |
+| G8 | **Useful at every budget.** Free, micro, standard, and pro profiles all run the full pipeline. | Each profile has a measured baseline on the holdout set. A new user on the free profile reaches a first verified task in ≤ 15 minutes with zero spend. |
 
 ## Non-goals
 
@@ -35,10 +40,11 @@ Deliberately **out of scope**, at least until v3:
 
 - **Building an agent loop from scratch** to compete with Claude Code and similar tools. Existing agents are executors. Exception: the "direct API" adapter for simple tasks.
 - **Training or fine-tuning models.** All learning happens in the harness layer (rules, taste, skills, routing).
-- **Local models as the main brain.** Allowed for experiments, not the production path.
+- **Optimizing for local models.** Local models are supported as an OpenAI-compatible provider (useful for the free profile) but are not tuned for.
 - **Multi-user product or SaaS.** Arpeggio is a personal tool. The design should not preclude this, but does not optimize for it.
 - **Fully autonomous operation.** Merging to the main branch, deploying, and destructive actions always require approval.
 - **Circumventing subscription limits or provider terms of service.**
+- **Circumventing free-tier or subscription limits**: multi-account or multi-key rotation for the same provider, reverse-engineered or MITM endpoints, scraping web UIs, or reusing subscription credentials outside official clients.
 
 ## Core metrics
 
@@ -62,8 +68,8 @@ Absolute numbers are set only after the baseline is measured in v0. Until then, 
 | Version | Target |
 |---|---|
 | v0 | Measured baseline: 4 strategies run on the eval suite; every core metric has a number. |
-| v1 | Cost per solved task ≥ 40% below Middle; success rate drops ≤ 5 percentage points; escape rate does not rise. |
-| v2 | Data-driven router beats the v1 rule router on holdout for both cost and success rate. Post-agent edits ≥ 25% below v1. |
+| v1 | Cost per solved task ≥ 40% below Middle; success rate drops ≤ 5 percentage points; escape rate does not rise. Free and micro profiles each have a measured baseline report. |
+| v2 | Data-driven router beats the v1 rule router on holdout for both cost and success rate. Post-agent edits ≥ 25% below v1. Free-profile success rate on holdout reported and tracked against v1. |
 | v3 | Arpeggio is the user's default way of working with AI: ≥ 80% of daily coding tasks go through Arpeggio for a full month. |
 
 ## Decision priorities
