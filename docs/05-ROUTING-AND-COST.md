@@ -14,7 +14,9 @@ Tiers are logical. Concrete models and prices live in config and change over tim
 | `tier2` (mid) | Default builder | Most features, local refactors, data scripts, tests |
 | `tier3` (frontier) | Planner / expert / reviewer | Architecture, hard debugging, cross-file changes, `full` reviews, high-risk tasks |
 
-### Example config (`config/arpeggio.example.toml`)
+### Example config (`src/arpeggio_ai/config/templates/config.example.toml`)
+
+`arpeggio init` copies the packaged template to `~/.arpeggio/config.toml`. The template carries more comments than the excerpt below, and if the two ever differ, the template is correct.
 
 ```toml
 [budget]

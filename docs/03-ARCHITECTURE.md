@@ -162,7 +162,7 @@ Notes:
 | Dashboard | FastAPI + server-rendered HTML (HTMX) + a chart library | Minimal frontend; no build step in v1. |
 | MCP (v2) | Official MCP Python SDK | Standard way to share context with agents. |
 | Testing | pytest, pytest-asyncio, hypothesis for policy logic | |
-| Quality | ruff, mypy (strict on core) | |
+| Quality | ruff (lint and format), mypy `--strict` on all of `src/arpeggio_ai` | |
 
 ## Repository layout
 
@@ -172,15 +172,19 @@ arpeggio/
 ├── CLAUDE.md
 ├── README.md
 ├── pyproject.toml
+├── uv.lock
 ├── docs/
 │   ├── 01-VISION-AND-GOALS.md … 08-ROADMAP.md
 │   └── adr/
 ├── config/
-│   ├── arpeggio.example.toml          # providers, tiers, prices, budgets
-│   └── policy.example.yaml        # routing policy (rules)
+│   └── policy.example.yaml        # routing policy (rules), planned
 ├── src/arpeggio_ai/
-│   ├── cli/                       # Typer app, commands
-│   ├── core/                      # task, attempt, lifecycle state machine, orchestrator
+│   ├── paths.py                   # ARPEGGIO_HOME and config file locations
+│   ├── config/                    # models.py (Pydantic schema), loader.py (read, merge, validate)
+│   │   └── templates/
+│   │       └── config.example.toml    # providers, tiers, prices, budgets (written by `arpeggio init`)
+│   ├── cli/                       # Typer app, output helpers, commands/
+│   ├── core/                      # errors.py now, later task, attempt, lifecycle state machine, orchestrator
 │   ├── intake/                    # criteria derivation, clarification, splitting
 │   ├── routing/                   # risk.py, policy.py, bandit.py (v2), fallback.py
 │   ├── cost/                      # governor.py, pricing.py, budget.py, loops.py, context_diet.py
@@ -201,6 +205,8 @@ arpeggio/
     └── integration/
 ```
 
+The example config lives at `src/arpeggio_ai/config/templates/config.example.toml`, inside the package, so an installed `arpeggio init` can read it through `importlib.resources`.
+
 ## Data and file locations
 
 | Path | Contents |
@@ -211,7 +217,10 @@ arpeggio/
 | `~/.arpeggio/worktrees/<attempt>/` | Isolated worktrees (cleaned after merge/reject) |
 | `~/.arpeggio/taste/` | Vendor-neutral taste rules (git repo) |
 | `~/.arpeggio/skills/` | Reusable skills (git repo) |
-| `<repo>/.arpeggio/config.toml` | Per-repo overrides: privacy class, allowlist, checks |
+| `~/.arpeggio/logs/` | Structured JSON logs (OBS-03) |
+| `<repo>/.arpeggio/config.toml` | Per-repo overrides, deep-merged over the global config. The only file allowed a `[repo]` table (privacy class, provider allowlist). Checks are planned. |
+
+`~/.arpeggio` is the default home. Set `ARPEGGIO_HOME` to use another directory. `arpeggio init` creates the home and its `artifacts/`, `worktrees/`, `taste/`, `skills/` and `logs/` subdirectories with mode `0700` on POSIX.
 
 ## Key design decisions
 

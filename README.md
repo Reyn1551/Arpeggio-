@@ -2,7 +2,7 @@
 
 > A personal AI workbench: one orchestrator on top of many coding agents and models that picks the cheapest path that is still correct, verifies the result, and learns from every task.
 
-**Status:** v0 (planning).
+**Status:** v0. Milestone M0.1 is done: project skeleton, validated config, `arpeggio init` and `arpeggio config`.
 
 *Like an arpeggio, which plays a chord one note at a time from the bottom up, Arpeggio plays every task from the cheapest capable model upward, and only climbs when it has to.*
 
@@ -49,11 +49,24 @@ Arpeggio does not build a new agent. It is a **brain layer and a learning layer*
 | [ADRs](docs/adr/) | Architecture decision records |
 | [AGENTS.md](AGENTS.md) | Rules for coding agents that help build this repo |
 
-## Quick start (planned, not working yet)
+## Quick start
+
+You need Python 3.12 or newer and [uv](https://docs.astral.sh/uv/).
 
 ```bash
-uv sync
-arpeggio init                        # create ~/.arpeggio/arpeggio.db and example config
+uv sync                                # install into .venv
+uv run arpeggio --install-completion   # optional shell completion
+uv run arpeggio init                   # create ~/.arpeggio/ and a starter config.toml
+uv run arpeggio config validate        # check it (--repo PATH also merges a repo's overrides)
+```
+
+`arpeggio init` writes to `~/.arpeggio/`, or to `$ARPEGGIO_HOME` when that variable is set. Running it again changes nothing. Fill in `config.toml` (providers, model ids, prices), then run `arpeggio config validate`. Use `arpeggio config show` to print the merged result. Every command accepts `--json` and prints one JSON object for scripts.
+
+### Planned
+
+These commands do not exist yet:
+
+```bash
 arpeggio run "add email validation to the signup form" --repo ~/code/skriptif
 arpeggio status                      # active tasks, today's spend, approval queue
 arpeggio eval run --strategy all     # 4-strategy baseline experiment on the eval suite

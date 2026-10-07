@@ -21,7 +21,7 @@ Run lint, type check, and the relevant tests before declaring any task done. "Do
 
 ## Hard rules
 
-1. **Never** commit secrets, API keys, or real provider credentials. Config uses `env:VAR` references only.
+1. **Never** commit secrets, API keys, or real provider credentials. Config names where a key lives (`env:VAR` or `keychain:NAME`) and never holds the key itself.
 2. **Never** weaken safety code (`src/arpeggio_ai/safety/`) or the approval gate to make a test pass. If a safety test fails, fix the cause or stop and ask.
 3. **Never** edit files under `evals/holdout/` or any `hidden_tests` fixtures, and never read them to inform a change.
 4. **Never** add a network call, telemetry, or external service without an ADR.
@@ -31,7 +31,7 @@ Run lint, type check, and the relevant tests before declaring any task done. "Do
 
 ## Code conventions
 
-- Python 3.12, full type hints; `mypy --strict` on `src/arpeggio_ai/core`, `routing`, `cost`, `safety`, `store`.
+- Python 3.12, full type hints, `mypy --strict` on the whole `src/arpeggio_ai` package.
 - Async I/O (`asyncio`, `httpx`). No blocking calls in adapters or the orchestrator.
 - Core modules depend on interfaces, never on a concrete adapter. Adapters register in `adapters/registry.py`.
 - Configuration via Pydantic models; no magic constants for prices, tiers, thresholds, or budgets in code.
