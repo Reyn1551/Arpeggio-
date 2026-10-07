@@ -165,7 +165,7 @@ class ApiAdapter:
         self._check_route(spec, model, provider)
         if self._cancelled:
             raise _Finished("cancelled", "cancelled before the first request")
-        headers = self._headers(model.provider, provider)
+        headers: dict[str, str] | None = None  # resolved after the first guard check
 
         url = f"{(provider.base_url or '').rstrip('/')}/chat/completions"
         timeout = httpx.Timeout(CONNECT_TIMEOUT_S, read=float(spec.timeout_s))
@@ -192,6 +192,8 @@ class ApiAdapter:
                         yield refusal
                         raise _Finished("paused", refusal.summary)
                     assert price is not None
+                    if headers is None:
+                        headers = self._headers(model.provider, provider)
                     sent += 1
                     log.info(
                         "adapter.request",
