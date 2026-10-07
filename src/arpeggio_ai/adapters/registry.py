@@ -30,3 +30,12 @@ def create(name: str, context: AdapterContext) -> Adapter:
 
 def names() -> list[str]:
     return sorted(_factories)
+
+
+def _api(context: AdapterContext) -> Adapter:
+    from arpeggio_ai.adapters.api import ApiAdapter  # imported here so httpx loads lazily
+
+    return ApiAdapter(context)
+
+
+register("api", _api)
