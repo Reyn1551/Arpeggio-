@@ -234,7 +234,7 @@ CREATE TABLE schema_version (
 - Repositories exist for `repos`, `tasks`, `attempts` and `steps`. The other tables, `quota_usage` included (first used in M1.11), get theirs in the milestone that first writes them.
 - `cached_tokens` counts cache-hit input tokens, which are priced at `price_cache_hit_per_m`.
 - A model call's price fields (`price_in_per_m`, `price_cache_hit_per_m`, `price_out_per_m`, `price_window`, `price_multiplier`) are the snapshot taken when the request started. Calls to free models and loopback providers store zero prices and `cost_usd = 0`, with their real token counts. `cost_usd` is rounded to 8 decimal places.
-- `steps.payload_ref` points at a JSON artifact holding the request body (without headers), the HTTP status and the raw response. The step row keeps only a summary of at most 200 characters. A spend-guard refusal is a `message` step with `cost_usd = 0` and no tokens.
+- `steps.payload_ref` points at a JSON artifact holding the request body (without headers), the HTTP status and the raw response. The step row keeps only a summary of at most 200 characters. A spend-guard refusal is a `message` step with `cost_usd = 0` and no tokens. A provider error that ends the attempt and reports no usage is also a `message` step with `cost_usd = 0`, and its artifact keeps the provider's error body.
 - The views below are not created yet. They arrive as a migration together with the first feature that reads them (baseline report in M0.6, dashboard in M1.9).
 
 ## Derived metrics (as SQL views)

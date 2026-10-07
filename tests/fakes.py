@@ -77,7 +77,7 @@ def ok(content: str = "Hello!", **kwargs: Any) -> httpx.Response:
 
 
 def status(code: int, headers: dict[str, str] | None = None, **body: Any) -> httpx.Response:
-    payload = body or {"error": {"message": f"HTTP {code}", "type": "error"}}
+    payload = body or {"error": {"type": "error"}}  # no message unless a test passes one
     return httpx.Response(code, json=payload, headers=headers)
 
 

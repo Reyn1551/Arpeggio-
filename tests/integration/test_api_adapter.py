@@ -404,16 +404,18 @@ def test_fake_key_never_reaches_artifacts_logs_or_db(harness: Harness) -> None:
         httpx.ReadTimeout,
         ok("first"),
         ok("second", model="other-model"),
-        status(401),
+        # A provider that echoes the key back must not get it into an artifact or message.
+        status(401, error={"message": f"Invalid API key {FAKE_KEY}", "type": "auth"}),
     )
     run = harness.run(provider, follow_ups=["More.", "Again."])
     assert run.result.status == "error"
     # Positive control: the key really was sent, so the searches below mean something.
     assert all(r.headers["Authorization"] == f"Bearer {FAKE_KEY}" for r in provider.requests)
-    assert len(run.steps) == 4
+    assert len(run.steps) == 5
+    assert run.result.final_message.endswith("Provider said: Invalid API key [REDACTED]")
 
     files = [p for p in artifacts_dir(harness.home).rglob("*") if p.is_file()]
-    assert len(files) == 4
+    assert len(files) == 5
     for path in files + list(logs_dir(harness.home).glob("*.jsonl")):
         assert FAKE_KEY not in path.read_text("utf-8"), path
     assert FAKE_KEY not in run.result.final_message
@@ -712,3 +714,66 @@ def test_default_context_uses_the_real_clock_and_sleep() -> None:
     assert abs((context.clock() - datetime.now(UTC)).total_seconds()) < 5
     asyncio.run(context.sleep(0))
     assert context.transport is None
+
+
+# Provider error details
+
+
+MODEL_NOT_FOUND = {
+    "error": {
+        "message": "The model `llama-x` does not exist or you do not have access to it.",
+        "type": "invalid_request_error",
+        "code": "model_not_found",
+    }
+}
+
+
+def test_fatal_error_keeps_the_provider_message_and_body(harness: Harness) -> None:
+    run = harness.run(FakeProvider(status(404, **MODEL_NOT_FOUND)))
+    assert run.result.final_message == (
+        "provider deepseek returned HTTP 404; not retried. Provider said: The model `llama-x`"
+        " does not exist or you do not have access to it."
+    )
+    [step] = run.steps
+    assert (step.kind, step.summary, step.cost_usd) == ("message", "HTTP 404 from deepseek", 0.0)
+    assert step.payload_ref is not None
+    payload = json.loads(harness.artifacts.read(step.payload_ref))
+    assert (payload["status"], payload["response"]) == (404, MODEL_NOT_FOUND)
+    assert_totals_match_steps(run)
+
+
+def test_rejected_key_message_also_carries_the_provider_message(harness: Harness) -> None:
+    run = harness.run(FakeProvider(status(401, error={"message": "Invalid API Key"})))
+    assert run.result.final_message == (
+        "provider deepseek rejected the API key (HTTP 401); check env var DEEPSEEK_API_KEY."
+        " Provider said: Invalid API Key"
+    )
+
+
+def test_non_json_error_body_is_kept_as_text(harness: Harness) -> None:
+    run = harness.run(FakeProvider(httpx.Response(404, text="<html>Not Found</html>")))
+    assert run.result.final_message == "provider deepseek returned HTTP 404; not retried"
+    assert run.steps[0].payload_ref is not None
+    payload = json.loads(harness.artifacts.read(run.steps[0].payload_ref))
+    assert payload["response"] == "<html>Not Found</html>"
+
+
+@pytest.mark.parametrize(
+    ("data", "expected"),
+    [
+        ({"error": {"message": "  bad\n  model  "}}, "bad model"),
+        ({"error": "quota exceeded"}, "quota exceeded"),
+        ({"message": "not found"}, "not found"),
+        ({"error": {"message": ""}}, None),
+        ({"error": {"code": 1}}, None),
+        ({"detail": "x"}, None),
+        ("text", None),
+        (None, None),
+        ({"error": {"message": "x" * 300}}, "x" * 197 + "..."),
+        ({"error": {"message": f"key {FAKE_KEY} rejected"}}, "key [REDACTED] rejected"),
+    ],
+)
+def test_error_detail(data: object, expected: str | None) -> None:
+    from arpeggio_ai.adapters.api import _error_detail
+
+    assert _error_detail(data, FAKE_KEY) == expected

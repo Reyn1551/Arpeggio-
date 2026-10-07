@@ -10,6 +10,7 @@ the orchestrator stores as an artifact.
 See ADR-0007 and docs/05-ROUTING-AND-COST.md for the rules this implements.
 """
 
+import json
 import logging
 from collections.abc import AsyncIterator, Mapping
 from dataclasses import asdict, dataclass
@@ -29,6 +30,7 @@ from arpeggio_ai.adapters.base import (
 )
 from arpeggio_ai.config.models import RESERVED_REQUEST_FIELDS, ModelSpec, Provider
 from arpeggio_ai.core.errors import AdapterError, SecretNotFound, SpendRefused
+from arpeggio_ai.core.logs import REDACTED
 from arpeggio_ai.core.secrets import reference_name, resolve
 from arpeggio_ai.cost.guard import check_call
 from arpeggio_ai.cost.pricing import PriceSnapshot, compute_cost, normalize_usage, round_usd
@@ -61,6 +63,33 @@ def _json(response: httpx.Response) -> Any:
         return response.json()
     except ValueError:
         return None
+
+
+def _scrub(value: Any, secret: str | None) -> Any:
+    """``value`` with every occurrence of ``secret`` replaced, in case a provider echoes it."""
+    if not secret:
+        return value
+    text = json.dumps(value)
+    if secret not in text:
+        return value
+    return json.loads(text.replace(secret, REDACTED))
+
+
+def _error_detail(data: Any, secret: str | None) -> str | None:
+    """The provider's own error message (``error.message`` or ``message``), cut to one line."""
+    error = data.get("error") if isinstance(data, dict) else None
+    if isinstance(error, dict):
+        message = error.get("message")
+    elif isinstance(error, str):
+        message = error
+    else:
+        message = data.get("message") if isinstance(data, dict) else None
+    if not isinstance(message, str) or not message.strip():
+        return None
+    text = " ".join(message.split())
+    if secret:
+        text = text.replace(secret, REDACTED)
+    return _summary(text)
 
 
 def _content(data: Any) -> str | None:
@@ -121,6 +150,7 @@ class ApiAdapter:
         self._result: AttemptResult | None = None
         self._cancelled = False
         self._spent_usd = 0.0
+        self._secret: str | None = None  # only to scrub provider echoes; never logged
 
     def capabilities(self) -> dict[str, bool]:
         return {
@@ -247,7 +277,8 @@ class ApiAdapter:
             secret = resolve(provider.api_key, self._context.env)
         except (SecretNotFound, NotImplementedError, ValueError) as exc:
             raise _Finished("error", f"provider {provider_name}: {exc}") from None
-        return {"Authorization": f"Bearer {secret.get_secret_value()}"}
+        self._secret = secret.get_secret_value()
+        return {"Authorization": f"Bearer {self._secret}"}
 
     def _guard(
         self, key: str, messages: list[Message], spec: AttemptSpec
@@ -315,6 +346,22 @@ class ApiAdapter:
             billed = self._model_call(body, status, data, price, model, prompt_chars, 0)
         if status not in RETRY_STATUSES:
             fatal = self._failure_message(model.provider, status)
+            detail = _error_detail(data, self._secret)
+            if detail:
+                fatal = f"{fatal}. Provider said: {detail}"
+            if billed is None:
+                # Keep the provider's error body, so the failure can be diagnosed later.
+                response_body = data if data is not None else response.text[:2000]
+                billed = StepEvent(
+                    kind="message",
+                    summary=_summary(f"HTTP {status} from {model.provider}"),
+                    payload={
+                        "request": body,
+                        "status": status,
+                        "response": _scrub(response_body, self._secret),
+                    },
+                    cost_usd=0.0,
+                )
             return _Outcome(event=billed, status=status, fatal=fatal)
         return _Outcome(
             event=billed,
@@ -356,7 +403,7 @@ class ApiAdapter:
         return StepEvent(
             kind="model_call",
             summary=summary,
-            payload={"request": body, "status": status, "response": data},
+            payload={"request": body, "status": status, "response": _scrub(data, self._secret)},
             input_tokens=usage.input_tokens,
             output_tokens=output_tokens,
             cached_tokens=usage.cache_hit_tokens,
