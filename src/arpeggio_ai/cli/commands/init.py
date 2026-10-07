@@ -1,6 +1,7 @@
 """`arpeggio init`: create the home, runtime subdirectories, a starter config and the database."""
 
 import logging
+import os
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -10,8 +11,13 @@ import typer
 from rich.text import Text
 
 from arpeggio_ai.cli.output import JSON_HELP, console, emit_json, json_mode, run_command
-from arpeggio_ai.config.loader import DEFAULT_TEMPLATE, template_bytes
-from arpeggio_ai.core.errors import ArpeggioError
+from arpeggio_ai.config.loader import (
+    DEFAULT_TEMPLATE,
+    TEMPLATES,
+    template_bytes,
+    template_env_vars,
+)
+from arpeggio_ai.core.errors import ArpeggioError, ConfigError, ConfigIssue
 from arpeggio_ai.core.logs import configure_logging
 from arpeggio_ai.paths import RUNTIME_SUBDIRS, arpeggio_home, db_path, global_config_path, logs_dir
 from arpeggio_ai.store.db import open_db
@@ -24,17 +30,22 @@ log = logging.getLogger(__name__)
 @dataclass
 class InitResult:
     home: Path
+    profile: str
     created: list[str] = field(default_factory=list)
     skipped: list[str] = field(default_factory=list)
     backup: str | None = None
+    # Env var name -> whether it is set and non-empty. Values are never read out.
+    env_expected: dict[str, bool] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "ok": True,
             "home": str(self.home),
+            "profile": self.profile,
             "created": self.created,
             "skipped": self.skipped,
             "backup": self.backup,
+            "env_expected": self.env_expected,
         }
 
 
@@ -51,9 +62,23 @@ def _ensure_dir(path: Path, result: InitResult) -> None:
     result.created.append(str(path))
 
 
-def initialize(home: Path, force: bool) -> InitResult:
-    """Create what is missing and skip what exists. Never deletes or overwrites a user file."""
-    result = InitResult(home=home)
+def initialize(home: Path, force: bool, profile: str = DEFAULT_TEMPLATE) -> InitResult:
+    """Create what is missing and skip what exists. Never deletes or overwrites a user file.
+
+    ``profile`` names the packaged template written to config.toml when there is none
+    (or when ``force`` moved the old one aside).
+    """
+    if profile not in TEMPLATES:
+        raise ConfigError(
+            [
+                ConfigIssue(
+                    file="command line",
+                    field="--profile",
+                    message=f"unknown profile '{profile}'. Valid: {', '.join(TEMPLATES)}",
+                )
+            ]
+        )
+    result = InitResult(home=home, profile=profile)
     _ensure_dir(home, result)
     for name in RUNTIME_SUBDIRS:
         _ensure_dir(home / name, result)
@@ -70,7 +95,7 @@ def initialize(home: Path, force: bool) -> InitResult:
         result.skipped.append(str(config_path))
     else:
         with config_path.open("xb") as handle:
-            handle.write(template_bytes(DEFAULT_TEMPLATE))
+            handle.write(template_bytes(profile))
         result.created.append(str(config_path))
 
     # Opening the database creates it if needed and applies pending migrations. An existing
@@ -81,9 +106,14 @@ def initialize(home: Path, force: bool) -> InitResult:
     open_db(database).close()
     (result.skipped if existed else result.created).append(str(database))
 
+    result.env_expected = {name: bool(os.environ.get(name)) for name in template_env_vars(profile)}
     log.info(
         "init.completed",
-        extra={"created_count": len(result.created), "skipped_count": len(result.skipped)},
+        extra={
+            "profile": profile,
+            "created_count": len(result.created),
+            "skipped_count": len(result.skipped),
+        },
     )
     return result
 
@@ -101,6 +131,21 @@ def _print_human(result: InitResult) -> None:
         rows.append(("backup", result.backup, "yellow"))
     for label, path, style in rows:
         out.print(Text.assemble(("  " + label.ljust(8), style), short(path)))
+
+    config_path = str(global_config_path(result.home))
+    if config_path in result.created:
+        out.print(Text.assemble(("Profile template: ", "bold"), result.profile))
+    else:
+        out.print(
+            f"config.toml already exists and was kept. Use --force to replace it with the "
+            f"{result.profile} template.",
+            markup=False,
+        )
+    if result.env_expected:
+        out.print(Text("The profile reads API keys from:", style="bold"))
+        for name, present in result.env_expected.items():
+            state = ("set", "green") if present else ("not set", "yellow")
+            out.print(Text.assemble("  " + name + "  ", state))
     out.print("Next: fill in config.toml, then run `arpeggio config validate`.", markup=False)
 
 
@@ -114,11 +159,19 @@ def init_command(
             "fresh one.",
         ),
     ] = False,
+    profile: Annotated[
+        str,
+        typer.Option(
+            "--profile",
+            metavar="NAME",
+            help=f"Config template to write: {', '.join(TEMPLATES)}.",
+        ),
+    ] = DEFAULT_TEMPLATE,
     json_flag: Annotated[bool, typer.Option("--json", help=JSON_HELP)] = False,
 ) -> None:
     """Create the Arpeggio home, a starter config.toml and the database. Safe to run again."""
     as_json = json_mode(ctx, json_flag)
-    result = run_command(as_json, lambda: initialize(arpeggio_home(), force))
+    result = run_command(as_json, lambda: initialize(arpeggio_home(), force, profile))
     if as_json:
         emit_json(result.to_dict())
     else:

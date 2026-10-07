@@ -48,6 +48,7 @@ def validate_command(
         emit_json(
             {
                 "ok": True,
+                "profile": config.budget.profile,
                 "providers": len(config.providers),
                 "models": len(config.models),
                 "tiers": tiers,
@@ -58,6 +59,7 @@ def validate_command(
     out = console()
     out.print("Config OK", style="bold green")
     out.print(
+        f"profile {config.budget.profile}, "
         f"{_count(len(config.providers), 'provider')}, {_count(len(config.models), 'model')}, "
         f"tiers {', '.join(str(tier) for tier in tiers)}",
         markup=False,

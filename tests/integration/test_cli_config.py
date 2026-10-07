@@ -57,7 +57,10 @@ def test_validate_ok_human(write_global: WriteFile, template_text: str, home: Pa
     write_global(template_text)
     result = invoke("config", "validate")
     assert result.exit_code == 0
-    assert result.stdout.splitlines()[:2] == ["Config OK", "2 providers, 3 models, tiers 1, 2, 3"]
+    assert result.stdout.splitlines()[:2] == [
+        "Config OK",
+        "profile standard, 2 providers, 3 models, tiers 1, 2, 3",
+    ]
     assert str(home / "config.toml") in result.stdout
     assert result.stderr == ""
 
@@ -69,6 +72,7 @@ def test_validate_ok_json(write_global: WriteFile, template_text: str) -> None:
     assert result.stdout.count("\n") == 1
     assert json.loads(result.stdout) == {
         "ok": True,
+        "profile": "standard",
         "providers": 2,
         "models": 3,
         "tiers": [1, 2, 3],
