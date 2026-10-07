@@ -111,7 +111,7 @@ class AttemptSpec:
     attempt_id: str
     prompt: str             # first user turn, incl. done criteria
     route: Route
-    timeout_s: int          # also the read timeout of each API request
+    timeout_s: int          # read timeout and wall-clock deadline of each API request
     max_steps: int          # model calls allowed in this attempt (EXE-06)
     max_tokens: int         # output cap per model call, required
     worktree: str | None = None           # absolute path to the isolated worktree (M0.4)
@@ -154,7 +154,7 @@ Notes:
 - Adapters do no disk or database I/O. `orchestrator/attempts.py` (`run_attempt`) consumes the events, writes each payload to `artifacts/`, appends the step with its price snapshot, flags a model mismatch on the attempt, and sets the final status.
 - Every adapter passes `tests/contract/test_adapter_contract.py` against a fake backend.
 - `capabilities()` lets the router avoid routes an adapter cannot honor (for example, effort control or exact token reporting).
-- The `api` adapter (M0.3) speaks non-streaming chat completions to `openai_compatible` providers at `POST {base_url}/chat/completions`. The model's `effort_params` for the chosen effort are merged into the top level of the request body. Before each request the spend guard (`cost/guard.py`) runs. 429, 500, 502, 503, 504 and timeouts are retried up to 3 times (full-jitter backoff, base 1 s, cap 30 s, `Retry-After` honored up to `max_quota_wait_s`), then the attempt ends with `error` (RTE-12). See [ADR-0007](adr/0007-httpx-and-first-network-calls.md).
+- The `api` adapter (M0.3) speaks non-streaming chat completions to `openai_compatible` providers at `POST {base_url}/chat/completions`. The model's `effort_params` for the chosen effort are merged into the top level of the request body. Before each request the spend guard (`cost/guard.py`) runs. `timeout_s` is both the read timeout and a wall-clock deadline for each request: a response that trickles in and is not complete in time ends the attempt with status `timeout` (EXE-06), and the call is recorded as an estimated step. 429, 500, 502, 503, 504 and timeouts are retried up to 3 times (full-jitter backoff, base 1 s, cap 30 s, `Retry-After` honored up to `max_quota_wait_s`), then the attempt ends with `error` (RTE-12). See [ADR-0007](adr/0007-httpx-and-first-network-calls.md).
 - Adapters that wrap CLIs parse the CLI's structured/streaming output. Exact flags must be verified against each tool's current documentation at implementation time.
 - Approval-gated actions surface as `approval_request` events; the orchestrator pauses the stream until a decision arrives.
 

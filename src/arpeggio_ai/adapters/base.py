@@ -47,7 +47,7 @@ class AttemptSpec:
     attempt_id: str
     prompt: str
     route: Route
-    timeout_s: int
+    timeout_s: int  # read timeout and wall-clock deadline of each request (EXE-06)
     max_steps: int
     max_tokens: int  # output cap per model call; required, no default
     worktree: str | None = None
@@ -76,6 +76,8 @@ class StepEvent:
     cost_estimated: bool = False
     price: PriceSnapshot | None = None
     model_mismatch: bool = False
+    provider: str | None = None  # provider that served a model call
+    prompt_overhead_tokens: int | None = None  # input tokens beyond our prompt estimate
 
 
 @dataclass(frozen=True, slots=True)
@@ -93,6 +95,10 @@ def _now() -> datetime:
     return datetime.now(UTC)
 
 
+def _no_history(provider: str, model: str) -> int:
+    return 0
+
+
 @dataclass(frozen=True, slots=True)
 class AdapterContext:
     """Everything an adapter needs from outside. Tests replace the clock, sleep and network."""
@@ -103,6 +109,8 @@ class AdapterContext:
     random: Callable[[], float] = random.random
     env: Mapping[str, str] = field(default_factory=lambda: os.environ)
     transport: "httpx.AsyncBaseTransport | None" = None  # None means the real network
+    # (provider, model key) -> highest recent prompt overhead; see orchestrator.attempts.
+    prompt_overhead: Callable[[str, str], int] = _no_history
 
 
 class Adapter(Protocol):

@@ -10,6 +10,7 @@ the orchestrator stores as an artifact.
 See ADR-0007 and docs/05-ROUTING-AND-COST.md for the rules this implements.
 """
 
+import asyncio
 import json
 import logging
 from collections.abc import AsyncIterator, Mapping
@@ -32,8 +33,14 @@ from arpeggio_ai.config.models import RESERVED_REQUEST_FIELDS, ModelSpec, Provid
 from arpeggio_ai.core.errors import AdapterError, SecretNotFound, SpendRefused
 from arpeggio_ai.core.logs import REDACTED
 from arpeggio_ai.core.secrets import reference_name, resolve
-from arpeggio_ai.cost.guard import check_call
-from arpeggio_ai.cost.pricing import PriceSnapshot, compute_cost, normalize_usage, round_usd
+from arpeggio_ai.cost.guard import check_call, prompt_overhead
+from arpeggio_ai.cost.pricing import (
+    PriceSnapshot,
+    compute_cost,
+    estimate_tokens,
+    normalize_usage,
+    round_usd,
+)
 from arpeggio_ai.store.repositories import AttemptStatus
 
 log = logging.getLogger(__name__)
@@ -138,7 +145,8 @@ class _Outcome:
     reply: str | None = None
     status: int | None = None
     failure: str | None = None  # why to retry, for example "HTTP 503"
-    fatal: str | None = None  # ends the attempt with status error
+    fatal: str | None = None  # ends the attempt with fatal_status
+    fatal_status: AttemptStatus = "error"
     retry_after: float | None = None
 
 
@@ -151,6 +159,8 @@ class ApiAdapter:
         self._cancelled = False
         self._spent_usd = 0.0
         self._secret: str | None = None  # only to scrub provider echoes; never logged
+        self._run_overhead = 0  # highest prompt overhead seen in this run
+        self._overhead = 0  # effective overhead assumed for the request in flight
 
     def capabilities(self) -> dict[str, bool]:
         return {
@@ -175,6 +185,7 @@ class ApiAdapter:
     async def run(self, spec: AttemptSpec) -> AsyncIterator[StepEvent]:
         self._result = None
         self._spent_usd = 0.0
+        self._run_overhead = 0
         try:
             async for event in self._run(spec):
                 if event.cost_usd:
@@ -236,9 +247,11 @@ class ApiAdapter:
                     )
                     outcome = await self._send(client, url, body, headers, price, model, spec)
                     if outcome.event is not None:
+                        observed = outcome.event.prompt_overhead_tokens or 0
+                        self._run_overhead = max(self._run_overhead, observed)
                         yield outcome.event
                     if outcome.fatal is not None:
-                        raise _Finished("error", outcome.fatal)
+                        raise _Finished(outcome.fatal_status, outcome.fatal)
                     if outcome.reply is not None:
                         reply = outcome.reply
                         messages.append(Message("assistant", reply))
@@ -288,14 +301,19 @@ class ApiAdapter:
     def _guard(
         self, key: str, messages: list[Message], spec: AttemptSpec
     ) -> tuple[PriceSnapshot | None, StepEvent | None]:
+        config = self._context.config
+        provider_name = config.models[key].provider
+        observed = max(self._context.prompt_overhead(provider_name, key), self._run_overhead)
+        self._overhead = prompt_overhead(config, key, observed)
         try:
             price = check_call(
-                self._context.config,
+                config,
                 key,
                 prompt_chars=sum(len(message.content) for message in messages),
                 max_tokens=spec.max_tokens,
                 spent_usd=self._spent_usd,
                 at=self._context.clock(),
+                observed_overhead_tokens=observed,
             )
         except SpendRefused as exc:
             log.warning("adapter.spend_refused", extra={"model": key, "reason": str(exc)})
@@ -320,17 +338,44 @@ class ApiAdapter:
     ) -> _Outcome:
         prompt_chars = sum(len(message["content"]) for message in body["messages"])
         try:
-            response = await client.post(url, json=body, headers=dict(headers))
+            # httpx's read timeout only fires when nothing arrives for timeout_s. The deadline
+            # also ends a response that trickles in too slowly (EXE-06).
+            async with asyncio.timeout(float(spec.timeout_s)):
+                response = await client.post(url, json=body, headers=dict(headers))
         except httpx.ReadTimeout:
             # The provider got the request and may bill it: record an estimated input cost.
             event = self._model_call(
-                body, None, None, price, model, prompt_chars, 0, read_timeout=True
+                body,
+                None,
+                None,
+                price,
+                model,
+                prompt_chars,
+                0,
+                timed_out="read timeout; the provider may still bill this request",
             )
             return _Outcome(event=event, failure="timed out waiting for a response")
         except httpx.TimeoutException as exc:
             return _Outcome(failure=f"timed out ({type(exc).__name__})")
         except httpx.TransportError as exc:
             return _Outcome(failure=f"could not be reached ({type(exc).__name__})")
+        except TimeoutError:
+            event = self._model_call(
+                body,
+                None,
+                None,
+                price,
+                model,
+                prompt_chars,
+                0,
+                timed_out=f"no complete response within {spec.timeout_s}s; the provider may"
+                " still bill this request",
+            )
+            fatal = (
+                f"provider {model.provider} did not finish the response within the"
+                f" {spec.timeout_s}s deadline"
+            )
+            return _Outcome(event=event, fatal=fatal, fatal_status="timeout")
 
         data = _json(response)
         usage = data.get("usage") if isinstance(data, dict) else None
@@ -387,20 +432,35 @@ class ApiAdapter:
         prompt_chars: int,
         output_chars: int,
         *,
-        read_timeout: bool = False,
+        timed_out: str | None = None,
     ) -> StepEvent:
         raw_usage = data.get("usage") if isinstance(data, dict) else None
         usage = normalize_usage(raw_usage, prompt_chars, output_chars)
         if usage.clamped:
             log.warning("adapter.usage_clamped", extra={"provider": model.provider})
-        output_tokens = 0 if read_timeout else usage.output_tokens
+        output_tokens = 0 if timed_out else usage.output_tokens
+        overhead = None
+        if not usage.estimated:
+            estimate = estimate_tokens(prompt_chars)
+            overhead = max(usage.input_tokens - estimate, 0)
+            if usage.input_tokens > 2 * (estimate + self._overhead):
+                log.warning(
+                    "adapter.prompt_overhead",
+                    extra={
+                        "provider": model.provider,
+                        "model": model.model,
+                        "input_tokens": usage.input_tokens,
+                        "estimate_tokens": estimate,
+                        "assumed_overhead_tokens": self._overhead,
+                    },
+                )
         cost = round_usd(
             compute_cost(price, usage.input_tokens, usage.cache_hit_tokens, output_tokens)
         )
         actual = data.get("model") if isinstance(data, dict) else None
         actual = actual if isinstance(actual, str) and actual else None
-        if read_timeout:
-            summary = "read timeout; the provider may still bill this request"
+        if timed_out:
+            summary = timed_out
         elif status == 200:
             summary = _summary(_content(data) or "(empty reply)")
         else:
@@ -414,9 +474,11 @@ class ApiAdapter:
             cached_tokens=usage.cache_hit_tokens,
             cost_usd=cost,
             actual_model=actual,
-            cost_estimated=usage.estimated or read_timeout,
+            cost_estimated=usage.estimated or timed_out is not None,
             price=price,
             model_mismatch=is_mismatch(actual, model),
+            provider=model.provider,
+            prompt_overhead_tokens=overhead,
         )
 
     def _failure_message(self, provider_name: str, status: int) -> str:

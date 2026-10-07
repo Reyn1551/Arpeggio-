@@ -9,6 +9,7 @@ status.
 import json
 import logging
 import sqlite3
+from collections.abc import Callable
 
 from arpeggio_ai.adapters.base import (
     SUMMARY_MAX_CHARS,
@@ -23,11 +24,21 @@ from arpeggio_ai.store.artifacts import ArtifactStore
 from arpeggio_ai.store.repositories import (
     Step,
     append_step,
+    max_prompt_overhead,
     set_attempt_status,
     set_model_mismatch,
 )
 
 log = logging.getLogger(__name__)
+
+
+def overhead_history(conn: sqlite3.Connection) -> Callable[[str, str], int]:
+    """``AdapterContext.prompt_overhead`` backed by the last 20 recorded steps."""
+
+    def lookup(provider: str, model: str) -> int:
+        return max_prompt_overhead(conn, provider, model)
+
+    return lookup
 
 
 def record_step(
@@ -54,6 +65,8 @@ def record_step(
         price_window=None if price is None else price.window,
         price_multiplier=1.0 if price is None else price.multiplier,
         price_cache_hit_per_m=None if price is None else price.cache_hit_per_m,
+        provider=event.provider,
+        prompt_overhead_tokens=event.prompt_overhead_tokens,
     )
     if event.model_mismatch:
         set_model_mismatch(conn, spec.attempt_id, True)

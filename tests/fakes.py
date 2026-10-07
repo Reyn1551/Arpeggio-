@@ -129,6 +129,7 @@ def make_context(
     at: datetime = MONDAY_PEAK,
     sleep: FakeSleep | None = None,
     random: float = 0.5,
+    prompt_overhead: Callable[[str, str], int] | None = None,
 ) -> AdapterContext:
     return AdapterContext(
         config=config,
@@ -137,6 +138,7 @@ def make_context(
         random=lambda: random,
         env=KEY_ENV if env is None else env,
         transport=provider.transport,
+        prompt_overhead=prompt_overhead or (lambda provider, model: 0),
     )
 
 

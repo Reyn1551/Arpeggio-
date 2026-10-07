@@ -329,3 +329,25 @@ def test_opt_in_must_be_boolean(config_data: dict[str, Any], table: str) -> None
 def test_unknown_privacy_field_is_rejected(config_data: dict[str, Any]) -> None:
     config_data["privacy"] = {"allow_training": True}
     assert fields(config_data) == {"privacy.allow_training": "unknown field"}
+
+
+def test_prompt_overhead_fields(config_data: dict[str, Any], mid: dict[str, Any]) -> None:
+    config_data["providers"]["deepseek"]["prompt_overhead_tokens"] = 13_500
+    mid["prompt_overhead_tokens"] = 0
+    config = parse_config(config_data)
+    assert config.providers["deepseek"].prompt_overhead_tokens == 13_500
+    assert config.models[MID].prompt_overhead_tokens == 0
+    assert config.providers["anthropic"].prompt_overhead_tokens == 0
+    assert config.models["tier1.cheap"].prompt_overhead_tokens is None
+
+
+def test_negative_prompt_overhead_is_rejected(
+    config_data: dict[str, Any], mid: dict[str, Any]
+) -> None:
+    config_data["providers"]["deepseek"]["prompt_overhead_tokens"] = -1
+    mid["prompt_overhead_tokens"] = -5
+    problems = fields(config_data)
+    assert set(problems) == {
+        "providers.deepseek.prompt_overhead_tokens",
+        f"models.{MID}.prompt_overhead_tokens",
+    }

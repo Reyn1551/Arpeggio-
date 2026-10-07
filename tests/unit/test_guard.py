@@ -7,7 +7,7 @@ import pytest
 from arpeggio_ai.config.loader import template_bytes
 from arpeggio_ai.config.models import Config, parse_config
 from arpeggio_ai.core.errors import SpendRefused
-from arpeggio_ai.cost.guard import check_call
+from arpeggio_ai.cost.guard import check_call, prompt_overhead
 from arpeggio_ai.cost.pricing import PriceSnapshot
 
 PEAK = datetime(2026, 10, 5, 2, 0, tzinfo=UTC)  # Monday 02:00 UTC
@@ -161,3 +161,52 @@ def test_guard_counts_two_characters_per_prompt_token(micro: Config) -> None:
     # ceil(9 / 2) = 5 tokens. The recording estimate, ceil(9 / 4) = 3, would have passed.
     with pytest.raises(SpendRefused, match=r"worst-case cost \$0\.00001056"):
         check(config, "tier3.pro", prompt_chars=9, max_tokens=1)
+
+
+# Prompt overhead
+
+
+def with_overhead(config: Config, provider: int = 0, model: int | None = None) -> Config:
+    deepseek = config.providers["deepseek"].model_copy(update={"prompt_overhead_tokens": provider})
+    pro = config.models["tier3.pro"].model_copy(update={"prompt_overhead_tokens": model})
+    return config.model_copy(
+        update={"providers": {"deepseek": deepseek}, "models": {**config.models, "tier3.pro": pro}}
+    )
+
+
+def test_prompt_overhead_defaults_to_zero(micro: Config) -> None:
+    assert prompt_overhead(micro, "tier3.pro") == 0
+
+
+def test_prompt_overhead_takes_the_larger_of_configured_and_observed(micro: Config) -> None:
+    config = with_overhead(micro, provider=500)
+    assert prompt_overhead(config, "tier3.pro") == 500
+    assert prompt_overhead(config, "tier3.pro", observed_tokens=13_500) == 13_500
+    assert prompt_overhead(config, "tier1.flash", observed_tokens=10) == 500
+
+
+def test_model_overhead_overrides_the_provider(micro: Config) -> None:
+    assert prompt_overhead(with_overhead(micro, provider=500, model=0), "tier3.pro") == 0
+    assert prompt_overhead(with_overhead(micro, provider=500, model=900), "tier3.pro") == 900
+
+
+def test_observed_overhead_alone_makes_the_guard_refuse(micro: Config) -> None:
+    # tier3.pro peak, 10 chars -> 5 guard tokens, 64 output tokens:
+    # (5 * 1.32 + 64 * 3.96) / 1M = $0.00026004, inside a $0.001 budget.
+    budget = micro.budget.model_copy(update={"per_task_usd": 0.001})
+    config = micro.model_copy(update={"budget": budget})
+    check(config, "tier3.pro", prompt_chars=10, max_tokens=64)
+    # 10,000 observed overhead tokens add $0.0132.
+    with pytest.raises(SpendRefused) as caught:
+        check(config, "tier3.pro", prompt_chars=10, max_tokens=64, observed_overhead_tokens=10_000)
+    assert str(caught.value) == (
+        "model tier3.pro: worst-case cost $0.01346004 (including 10000 tokens of prompt"
+        " overhead) for this call is more than the $0.00100000 left of per_task_usd"
+    )
+
+
+def test_configured_overhead_makes_the_guard_refuse(micro: Config) -> None:
+    budget = micro.budget.model_copy(update={"per_task_usd": 0.001})
+    config = with_overhead(micro.model_copy(update={"budget": budget}), provider=10_000)
+    with pytest.raises(SpendRefused, match="including 10000 tokens of prompt overhead"):
+        check(config, "tier3.pro", prompt_chars=10, max_tokens=64)

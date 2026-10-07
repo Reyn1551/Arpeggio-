@@ -19,6 +19,7 @@ from fakes import (
     FakeProvider,
     FakeSleep,
     collect,
+    completion,
     deepseek_usage,
     make_context,
     make_spec,
@@ -31,7 +32,7 @@ from arpeggio_ai.adapters import registry
 from arpeggio_ai.adapters.base import AttemptResult, AttemptSpec, StepEvent
 from arpeggio_ai.config.models import Config, parse_config
 from arpeggio_ai.core.logs import configure_logging
-from arpeggio_ai.orchestrator.attempts import run_attempt
+from arpeggio_ai.orchestrator.attempts import overhead_history, run_attempt
 from arpeggio_ai.paths import artifacts_dir, db_path, logs_dir
 from arpeggio_ai.store.artifacts import ArtifactStore
 from arpeggio_ai.store.db import open_db
@@ -73,9 +74,10 @@ class Harness:
         config: Config | None = None,
         model: str = "tier1.flash",
         effort: str = "low",
+        history: bool = True,
         **kwargs: Any,
     ) -> Run:
-        context_args = {
+        context_args: dict[str, Any] = {
             name: kwargs.pop(name) for name in ("env", "at", "random") if name in kwargs
         }
         sleep = FakeSleep()
@@ -89,6 +91,8 @@ class Harness:
             route_reason={"test": True},
         )
         spec = make_spec(model, effort, task_id=self.task.id, attempt_id=attempt.id, **kwargs)
+        if history:
+            context_args["prompt_overhead"] = overhead_history(self.conn)
         context = make_context(config or template_config(), provider, sleep=sleep, **context_args)
         adapter = registry.create("api", context)
         result = asyncio.run(run_attempt(self.conn, self.artifacts, adapter, spec))
@@ -785,3 +789,129 @@ def test_step_limit_message_names_the_last_failure(harness: Harness) -> None:
         "step limit reached (1 calls); the last request timed out waiting for a response"
     )
     assert run.steps[0].summary == "read timeout; the provider may still bill this request"
+
+
+# Prompt overhead (gateways adding hidden context)
+
+
+def gateway_reply(content: str = "ok", hit: int = 0) -> httpx.Response:
+    # "Say hello." is 10 chars (ceil(10 / 4) = 3 tokens), but the gateway bills 10,003.
+    return ok(content, usage=deepseek_usage(10_003, hit, 1))
+
+
+def warnings(harness: Harness, event: str) -> list[dict[str, Any]]:
+    lines = [json.loads(line) for line in harness.log_text().splitlines()]
+    return [line for line in lines if line["event"] == event]
+
+
+def test_model_call_records_provider_and_observed_overhead(harness: Harness) -> None:
+    run = harness.run(FakeProvider(gateway_reply()), model="tier3.pro", effort="high")
+    [step] = run.steps
+    assert (step.provider, step.prompt_overhead_tokens) == ("deepseek", 10_000)
+    [warning] = warnings(harness, "adapter.prompt_overhead")
+    assert (warning["input_tokens"], warning["estimate_tokens"]) == (10_003, 3)
+    assert warning["assumed_overhead_tokens"] == 0
+
+
+def test_guard_refuses_once_observed_overhead_is_included(harness: Harness) -> None:
+    # Worst case without overhead: (5 * 1.32 + 64 * 3.96) / 1M = $0.00026004.
+    # With the 10,000 tokens seen on the first attempt it is $0.01346004.
+    harness.run(FakeProvider(gateway_reply()), model="tier3.pro", effort="high")
+    tight = template_config(per_task_usd=0.001)
+
+    blind = harness.run(
+        FakeProvider(ok()), config=tight, model="tier3.pro", effort="high", history=False
+    )
+    assert blind.result.status == "completed"  # without history the call fits the budget
+
+    provider = FakeProvider()
+    run = harness.run(provider, config=tight, model="tier3.pro", effort="high")
+    assert provider.requests == []
+    assert run.result.status == "paused"
+    assert "including 10000 tokens of prompt overhead" in run.result.final_message
+
+
+def test_overhead_seen_earlier_in_the_attempt_counts_without_history(harness: Harness) -> None:
+    # First turn: 10,000 of the 10,003 input tokens are cache hits, so it costs $0.00044792.
+    # Second turn: $0.000264 without overhead fits the $0.00955208 left; with 10,000
+    # overhead tokens ($0.0132) it does not.
+    provider = FakeProvider(gateway_reply("one", hit=10_000))
+    run = harness.run(
+        provider,
+        config=template_config(per_task_usd=0.01),
+        model="tier3.pro",
+        effort="high",
+        follow_ups=["two"],
+        history=False,
+    )
+    assert len(provider.requests) == 1
+    assert run.result.status == "paused"
+    assert [step.kind for step in run.steps] == ["model_call", "message"]
+
+
+def test_configured_overhead_refuses_the_first_call(harness: Harness) -> None:
+    config = template_config(per_task_usd=0.001)
+    deepseek = config.providers["deepseek"].model_copy(update={"prompt_overhead_tokens": 10_000})
+    config = config.model_copy(update={"providers": {"deepseek": deepseek}})
+    provider = FakeProvider()
+    run = harness.run(provider, config=config, model="tier3.pro", effort="high")
+    assert (provider.requests, run.result.status) == ([], "paused")
+
+
+def test_no_warning_once_the_overhead_is_assumed(harness: Harness) -> None:
+    harness.run(FakeProvider(gateway_reply()), model="tier3.pro", effort="high")
+    harness.run(FakeProvider(gateway_reply()), model="tier3.pro", effort="high")
+    # 10,003 is not more than 2 x (3 + 10,000), so only the first call warns.
+    assert len(warnings(harness, "adapter.prompt_overhead")) == 1
+
+
+def test_estimated_usage_records_no_overhead(harness: Harness) -> None:
+    run = harness.run(FakeProvider(ok(usage=None)))
+    [step] = run.steps
+    assert (step.provider, step.prompt_overhead_tokens) == ("deepseek", None)
+
+
+def test_ordinary_prompt_has_little_overhead_and_no_warning(harness: Harness) -> None:
+    run = harness.run(FakeProvider(ok(usage=deepseek_usage(5, 0, 1))))
+    assert run.steps[0].prompt_overhead_tokens == 2  # 5 billed - ceil(10 / 4)
+    assert warnings(harness, "adapter.prompt_overhead") == []
+
+
+# Wall-clock deadline per request (EXE-06)
+
+
+class DripStream(httpx.AsyncByteStream):
+    """A response body that arrives a few bytes at a time."""
+
+    def __init__(self, chunks: list[bytes], delay_s: float) -> None:
+        self.chunks, self.delay_s = chunks, delay_s
+
+    async def __aiter__(self) -> AsyncIterator[bytes]:
+        for chunk in self.chunks:
+            yield chunk
+            await asyncio.sleep(self.delay_s)
+
+
+def test_slow_drip_response_ends_as_a_timeout(harness: Harness) -> None:
+    # One byte per second for a minute: httpx's read timeout never fires, the deadline does.
+    drip = httpx.Response(200, stream=DripStream([b" "] * 60, delay_s=1.0))
+    provider = FakeProvider(drip)
+    run = harness.run(provider, timeout_s=1)
+    assert (run.result.status, run.attempt.status) == ("timeout", "timeout")
+    assert run.result.final_message == (
+        "provider deepseek did not finish the response within the 1s deadline"
+    )
+    [step] = run.steps
+    assert (
+        step.summary == "no complete response within 1s; the provider may still bill this request"
+    )
+    assert (step.cost_estimated, step.output_tokens) == (True, 0)
+    assert len(provider.requests) == 1 and run.sleep.calls == []
+
+
+def test_slow_but_complete_response_inside_the_deadline_succeeds(harness: Harness) -> None:
+    body = json.dumps(completion("Hello!", usage=deepseek_usage())).encode()
+    chunks = [body[i : i + 40] for i in range(0, len(body), 40)]
+    slow = httpx.Response(200, stream=DripStream(chunks, delay_s=0.01))
+    run = harness.run(FakeProvider(slow), timeout_s=5)
+    assert (run.result.status, run.result.final_message) == ("completed", "Hello!")

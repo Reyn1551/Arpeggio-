@@ -217,7 +217,14 @@ Before every request (`cost/guard.py`):
 
 1. A model whose provider id is still a template placeholder (`<...>`) is refused: "model <key> still has a placeholder id; edit your config".
 2. Under the `free` profile, a model that is neither `free = true` nor on a loopback provider is refused (BUD-02).
-3. The worst case for the call (prompt tokens, no cache hits, `max_tokens` output, at the current window) must not exceed `per_task_usd` minus what the attempt has spent so far. Equal is allowed. Here the prompt is estimated as `ceil(characters / 2)` tokens, twice the recording estimate below, so code and non-Latin text are not underestimated before money is spent. Estimated costs recorded for a call without usage still use `ceil(characters / 4)`.
+3. The worst case for the call (prompt tokens plus the prompt overhead below, no cache hits, `max_tokens` output, at the current window) must not exceed `per_task_usd` minus what the attempt has spent so far. Equal is allowed. Here the prompt is estimated as `ceil(characters / 2)` tokens, twice the recording estimate below, so code and non-Latin text are not underestimated before money is spent. Estimated costs recorded for a call without usage still use `ceil(characters / 4)`.
+
+**Gateways may inject hidden context.** A gateway can add its own system prompt or other context to every request and bill for it. In one live run through a hosted gateway, a prompt of about 8 tokens was billed as 13,500 input tokens. So the guard does not trust prompt length alone. Its worst case adds a prompt overhead, the larger of:
+
+- the configured `prompt_overhead_tokens` (the model's value, else the provider's), and
+- the highest overhead observed in the last 20 recorded model calls for the same provider and model key, read from `steps.prompt_overhead_tokens`, plus any overhead seen earlier in the current attempt.
+
+The observed overhead of a call is `input_tokens - ceil(characters / 4)` of the prompt actually sent, floored at 0, and it is only recorded when the provider reported usage. When a call's `input_tokens` is more than twice `ceil(characters / 4)` plus the overhead the guard assumed, the adapter logs the warning `adapter.prompt_overhead`. The first call to a new gateway can still be underestimated, so set `prompt_overhead_tokens` for a gateway you know adds context.
 
 A refused call sends nothing. It is recorded as a `message` step with cost 0, and the attempt pauses. Budgets across tasks, days and months (CST-03) and the prepaid balance check (BUD-03) come later, in M1.4 and M1.11.
 
@@ -291,6 +298,7 @@ The name starts with a lowercase letter and uses lowercase letters, digits, `_` 
 | `data_use` | string | `no_training`, `may_train` or `unknown` (default) (CFG-07) |
 | `pricing_windows.peak_utc` | list of strings | Optional. Each item is `Day[-Day] HH:MM-HH:MM` in UTC, for example `Mon-Fri 01:00-04:00`. Days are `Mon` to `Sun`, a day range goes forward within one week, and start is before end (`24:00` is allowed as an end). Split a window that crosses midnight into two |
 | `pricing_windows.offpeak_multiplier` | float | `0 < x <= 1`. Required when `peak_utc` is set. Model prices are peak prices, and off-peak calls cost price × multiplier (CFG-05) |
+| `prompt_overhead_tokens` | int | Default 0, `>= 0`. Input tokens the provider adds to every prompt, such as a gateway's hidden system prompt. The spend guard adds it to its worst case (see [Spend guard](#spend-guard)) |
 
 Two providers with the same `kind` and the same `base_url` are rejected, ignoring the case of scheme and host and a trailing `/`. One provider means one account (QTA-04).
 
@@ -310,6 +318,7 @@ The key is `tier1`, `tier2` or `tier3`, a dot, then lowercase letters, digits, `
 | `limits` | table | Optional `rpm`, `rpd`, `tpm`, `tpd`, each an integer `> 0` (QTA-01) |
 | `last_verified` | date | Required. `YYYY-MM-DD` (TOML date or string), not in the future (CFG-09) |
 | `response_model_aliases` | list of strings | Default empty. Names the provider may return for this model, for example a dated version. Not empty, no repeats (CFG-10) |
+| `prompt_overhead_tokens` | int | Optional, `>= 0`. Overrides the provider's `prompt_overhead_tokens` for this model |
 
 ### `[defaults]`
 

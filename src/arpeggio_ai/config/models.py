@@ -196,6 +196,8 @@ class Provider(_Model):
     gateway: bool = False
     data_use: DataUse = "unknown"
     pricing_windows: PricingWindows | None = None
+    # Input tokens the provider adds to every prompt (gateways may inject hidden context).
+    prompt_overhead_tokens: int = Field(default=0, ge=0)
 
     @field_validator("api_key")
     @classmethod
@@ -266,6 +268,8 @@ class ModelSpec(_Model):
     response_model_aliases: list[Annotated[str, StringConstraints(min_length=1)]] = Field(
         default_factory=list
     )
+    # Overrides the provider's prompt_overhead_tokens for this model when set.
+    prompt_overhead_tokens: int | None = Field(default=None, ge=0)
 
     # Set by Config from the model key ("tier2.mid" -> 2).
     _tier: int = PrivateAttr()
