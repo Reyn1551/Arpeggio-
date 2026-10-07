@@ -16,6 +16,8 @@ from arpeggio_ai.store.repositories import (
     get_task,
     list_steps,
     set_attempt_status,
+    set_deferred_until,
+    set_model_mismatch,
     set_task_status,
 )
 
@@ -35,7 +37,9 @@ def repo(db: sqlite3.Connection) -> Repo:
 
 @pytest.fixture
 def task(db: sqlite3.Connection, repo: Repo) -> Task:
-    return create_task(db, repo.id, "Add validation", "add email validation to signup")
+    return create_task(
+        db, repo.id, "Add validation", "add email validation to signup", profile="micro"
+    )
 
 
 @pytest.fixture
@@ -84,14 +88,21 @@ def test_create_task_round_trip(db: sqlite3.Connection, repo: Repo, task: Task) 
 
 def test_create_task_with_parent_and_budget(db: sqlite3.Connection, repo: Repo, task: Task) -> None:
     child = create_task(
-        db, repo.id, "sub", "sub", parent_id=task.id, category="feature", budget_usd=1.5
+        db,
+        repo.id,
+        "sub",
+        "sub",
+        profile="micro",
+        parent_id=task.id,
+        category="feature",
+        budget_usd=1.5,
     )
     assert (child.parent_id, child.category, child.budget_usd) == (task.id, "feature", 1.5)
 
 
 def test_create_task_with_unknown_repo_is_a_store_error(db: sqlite3.Connection) -> None:
     with pytest.raises(StoreError, match="cannot create task"):
-        create_task(db, "no-such-repo", "x", "x")
+        create_task(db, "no-such-repo", "x", "x", profile="free")
     assert not db.in_transaction
 
 
@@ -131,7 +142,7 @@ def test_create_attempt_round_trip(db: sqlite3.Connection, attempt: Attempt) -> 
 
 
 def test_attempt_seq_increments_per_task(db: sqlite3.Connection, repo: Repo, task: Task) -> None:
-    other = create_task(db, repo.id, "other", "other")
+    other = create_task(db, repo.id, "other", "other", profile="free")
     seqs = [create_attempt(db, task.id, **ROUTE).seq for _ in range(3)]
     assert seqs == [1, 2, 3]
     assert create_attempt(db, other.id, **ROUTE).seq == 1
@@ -248,3 +259,150 @@ def test_failed_step_write_leaves_no_step_and_no_totals(
     assert (after.cost_usd, after.steps_count) == (0.0, 0)
     assert list_steps(db, attempt.id) == []
     assert not db.in_transaction
+
+
+# Budget profile fields (BUD-01, RTE-11, CST-10, CST-11)
+
+
+def test_task_stores_profile_and_deferrable(db: sqlite3.Connection, repo: Repo) -> None:
+    task = create_task(db, repo.id, "eval", "eval", profile="free", deferrable=True, source="eval")
+    assert (task.profile, task.deferrable) == ("free", True)
+    assert get_task(db, task.id) == task
+
+
+def test_task_defaults_to_not_deferrable(task: Task) -> None:
+    assert (task.profile, task.deferrable) == ("micro", False)
+
+
+@pytest.mark.parametrize("profile", ["unknown", "cheap", "Free", ""])
+def test_create_task_rejects_profiles_other_than_the_four(
+    db: sqlite3.Connection, repo: Repo, profile: str
+) -> None:
+    with pytest.raises(StoreError, match="invalid task profile"):
+        create_task(db, repo.id, "t", "t", profile=profile)  # type: ignore[arg-type]
+    assert db.execute("SELECT COUNT(*) FROM tasks").fetchone()[0] == 0
+
+
+def test_create_task_requires_a_profile(db: sqlite3.Connection, repo: Repo) -> None:
+    with pytest.raises(TypeError):
+        create_task(db, repo.id, "t", "t")  # type: ignore[call-arg]
+
+
+def test_rows_from_before_0002_read_profile_unknown(db: sqlite3.Connection, repo: Repo) -> None:
+    db.execute(
+        "INSERT INTO tasks (id, repo_id, title, request, status, created_at)"
+        " VALUES ('OLD', ?, 't', 't', 'merged', 'x')",
+        (repo.id,),
+    )
+    old = get_task(db, "OLD")
+    assert old is not None
+    assert (old.profile, old.deferrable) == ("unknown", False)
+
+
+def test_model_mismatch_flag(db: sqlite3.Connection, attempt: Attempt) -> None:
+    assert attempt.model_mismatch is False
+    assert set_model_mismatch(db, attempt.id, True).model_mismatch is True
+    assert set_model_mismatch(db, attempt.id, False).model_mismatch is False
+    with pytest.raises(StoreError, match="unknown attempt"):
+        set_model_mismatch(db, "nope", True)
+
+
+def test_deferred_until(db: sqlite3.Connection, attempt: Attempt) -> None:
+    assert attempt.deferred_until is None
+    when = "2026-10-08T10:00:00.000Z"
+    assert set_deferred_until(db, attempt.id, when).deferred_until == when
+    assert set_deferred_until(db, attempt.id, None).deferred_until is None
+    with pytest.raises(StoreError, match="unknown attempt"):
+        set_deferred_until(db, "nope", when)
+
+
+@pytest.mark.parametrize(
+    "when", ["2026-10-08 10:00:00", "2026-10-08T10:00:00Z", "2026-13-08T10:00:00.000Z", ""]
+)
+def test_deferred_until_must_be_a_utc_timestamp(
+    db: sqlite3.Connection, attempt: Attempt, when: str
+) -> None:
+    with pytest.raises(StoreError, match="deferred_until must look like"):
+        set_deferred_until(db, attempt.id, when)
+
+
+def test_step_price_fields_round_trip(db: sqlite3.Connection, attempt: Attempt) -> None:
+    step = append_step(
+        db,
+        attempt.id,
+        "model_call",
+        input_tokens=1000,
+        cached_tokens=800,
+        output_tokens=100,
+        price_in_per_m=0.30,
+        price_cache_hit_per_m=0.006,
+        price_out_per_m=1.20,
+        price_window="offpeak",
+        price_multiplier=0.5,
+        actual_model="DeepSeek-V4.1-Flash",
+        cost_usd=0.0001,
+    )
+    assert (step.price_window, step.price_multiplier, step.price_cache_hit_per_m) == (
+        "offpeak",
+        0.5,
+        0.006,
+    )
+    assert step.actual_model == "DeepSeek-V4.1-Flash"
+    assert list_steps(db, attempt.id) == [step]
+
+
+def test_step_defaults_to_no_window_and_multiplier_one(
+    db: sqlite3.Connection, attempt: Attempt
+) -> None:
+    step = append_step(db, attempt.id, "tool_call")
+    assert (step.price_window, step.price_multiplier, step.actual_model) == (None, 1.0, None)
+
+
+def test_totals_still_equal_sum_of_steps_with_price_fields(
+    db: sqlite3.Connection, attempt: Attempt
+) -> None:
+    for window, multiplier, cost in (("peak", 1.0, 0.4), ("offpeak", 0.5, 0.2), ("flat", 1.0, 0.1)):
+        append_step(
+            db,
+            attempt.id,
+            "model_call",
+            input_tokens=100,
+            cached_tokens=40,
+            output_tokens=10,
+            price_window=window,  # type: ignore[arg-type]
+            price_multiplier=multiplier,
+            price_cache_hit_per_m=0.006,
+            cost_usd=cost,
+        )
+    total = get_attempt(db, attempt.id)
+    assert total is not None
+    sums = db.execute(
+        "SELECT SUM(cost_usd), SUM(input_tokens), SUM(cached_tokens), SUM(output_tokens), COUNT(*)"
+        " FROM steps WHERE attempt_id = ?",
+        (attempt.id,),
+    ).fetchone()
+    assert tuple(sums) == pytest.approx((0.7, 300, 120, 30, 3))
+    assert (
+        total.cost_usd,
+        total.input_tokens,
+        total.cached_tokens,
+        total.output_tokens,
+        total.steps_count,
+    ) == pytest.approx((0.7, 300, 120, 30, 3))
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "message"),
+    [
+        ({"price_window": "night"}, "invalid price window"),
+        ({"price_multiplier": 0}, "price_multiplier must be > 0"),
+        ({"price_multiplier": -0.5}, "price_multiplier must be > 0"),
+        ({"price_multiplier": float("nan")}, "price_multiplier must be > 0"),
+    ],
+)
+def test_bad_step_price_fields_are_rejected(
+    db: sqlite3.Connection, attempt: Attempt, kwargs: dict[str, Any], message: str
+) -> None:
+    with pytest.raises(StoreError, match=message):
+        append_step(db, attempt.id, "model_call", **kwargs)
+    assert list_steps(db, attempt.id) == []

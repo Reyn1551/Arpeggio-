@@ -208,7 +208,7 @@ def test_deleting_the_database_and_rerunning_init_gives_a_working_empty_system(h
     try:
         assert conn.execute("SELECT COUNT(*) FROM repos").fetchone()[0] == 0
         repo = ensure_repo(conn, "/code/app", "app")
-        assert create_task(conn, repo.id, "t", "t").status == "intake"
+        assert create_task(conn, repo.id, "t", "t", profile="free").status == "intake"
     finally:
         conn.close()
 

@@ -44,7 +44,7 @@ def test_each_line_is_a_json_object(log_file: Path) -> None:
 
 def test_log_lines_correlate_with_database_rows(log_file: Path, db: sqlite3.Connection) -> None:
     repo = ensure_repo(db, "/code/app", "app")
-    task = create_task(db, repo.id, "t", "t")
+    task = create_task(db, repo.id, "t", "t", profile="free")
     attempt = create_attempt(
         db,
         task.id,
