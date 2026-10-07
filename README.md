@@ -2,7 +2,7 @@
 
 > A personal AI workbench: one orchestrator on top of many coding agents and models that picks the cheapest path that is still correct, verifies the result, and learns from every task.
 
-**Status:** v0. Milestone M0.1 is done: project skeleton, validated config, `arpeggio init` and `arpeggio config`.
+**Status:** v0. Milestones M0.1 and M0.2 are done: validated config, `arpeggio init` and `arpeggio config`, the SQLite store with migrations, and JSON-lines logs.
 
 *Like an arpeggio, which plays a chord one note at a time from the bottom up, Arpeggio plays every task from the cheapest capable model upward, and only climbs when it has to.*
 
@@ -56,11 +56,11 @@ You need Python 3.12 or newer and [uv](https://docs.astral.sh/uv/).
 ```bash
 uv sync                                # install into .venv
 uv run arpeggio --install-completion   # optional shell completion
-uv run arpeggio init                   # create ~/.arpeggio/ and a starter config.toml
+uv run arpeggio init                   # create ~/.arpeggio/, a starter config.toml and arpeggio.db
 uv run arpeggio config validate        # check it (--repo PATH also merges a repo's overrides)
 ```
 
-`arpeggio init` writes to `~/.arpeggio/`, or to `$ARPEGGIO_HOME` when that variable is set. Running it again changes nothing. Fill in `config.toml` (providers, model ids, prices), then run `arpeggio config validate`. Use `arpeggio config show` to print the merged result. Every command accepts `--json` and prints one JSON object for scripts.
+`arpeggio init` writes to `~/.arpeggio/`, or to `$ARPEGGIO_HOME` when that variable is set. Running it again only adds what is missing and brings the database schema up to date. It never deletes data. Fill in `config.toml` (providers, model ids, prices), then run `arpeggio config validate`. Use `arpeggio config show` to print the merged result. Every command accepts `--json` and prints one JSON object for scripts.
 
 ### Planned
 

@@ -11,7 +11,7 @@ Goal: a store, one adapter, and a real baseline. Nothing smart yet.
 | Milestone | Scope | Requirements |
 |---|---|---|
 | M0.1 Skeleton (done 2026-10-07) | Repo, `uv`, CI (ruff, mypy, pytest), config loader with validation, `arpeggio init` | CFG-01..04, CLI-01 (init) |
-| M0.2 Store | SQLite schema v1, migrations, repositories, artifacts dir | OBS-01, OBS-03 |
+| M0.2 Store (done 2026-10-07) | SQLite schema v1, migrations, repositories, artifacts dir | OBS-01, OBS-03 |
 | M0.3 First adapter | Direct API adapter (OpenAI-compatible), cost recording per step | EXE-01, CST-01 |
 | M0.4 Worktrees + verifier | Worktree per attempt, done-criteria runner, verdicts | EXE-04, VER-01, VER-04 |
 | M0.5 Eval suite | ≥ 20 real tasks with hidden tests, tuning/holdout split | EVL-01, EVL-02 |
