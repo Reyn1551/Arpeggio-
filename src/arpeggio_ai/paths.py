@@ -32,6 +32,11 @@ def artifacts_dir(home: Path | None = None) -> Path:
     return (home if home is not None else arpeggio_home()) / "artifacts"
 
 
+def logs_dir(home: Path | None = None) -> Path:
+    """Return ``<home>/logs``."""
+    return (home if home is not None else arpeggio_home()) / "logs"
+
+
 def repo_config_path(repo: Path) -> Path:
     """Return ``<repo>/.arpeggio/config.toml`` as an absolute path."""
     return repo.expanduser().absolute() / DOT_DIRNAME / CONFIG_FILENAME

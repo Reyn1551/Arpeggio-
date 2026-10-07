@@ -1,3 +1,4 @@
+import logging
 import sqlite3
 import tomllib
 from collections.abc import Callable, Iterator
@@ -7,6 +8,7 @@ from typing import Any
 
 import pytest
 
+from arpeggio_ai.core.logs import ROOT_LOGGER, close_logging
 from arpeggio_ai.store.db import open_db
 
 
@@ -29,6 +31,16 @@ def home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     path = tmp_path / "arpeggio-home"
     monkeypatch.setenv("ARPEGGIO_HOME", str(path))
     return path
+
+
+@pytest.fixture(autouse=True)
+def reset_logging() -> Iterator[None]:
+    """Close the JSON-lines log file after each test and restore the logger defaults."""
+    yield
+    close_logging()
+    logger = logging.getLogger(ROOT_LOGGER)
+    logger.setLevel(logging.NOTSET)
+    logger.propagate = True
 
 
 @pytest.fixture
