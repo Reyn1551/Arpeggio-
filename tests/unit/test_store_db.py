@@ -19,7 +19,7 @@ from arpeggio_ai.store.db import (
 )
 
 DOCS_SCHEMA = Path(__file__).parents[2] / "docs" / "04-DATA-MODEL.md"
-LATEST = 3
+LATEST = 4
 
 
 def names(conn: sqlite3.Connection, kind: str) -> set[str]:
@@ -174,7 +174,7 @@ def v1_database(path: Path) -> sqlite3.Connection:
 def test_0002_applies_to_an_empty_database(tmp_path: Path) -> None:
     conn = sqlite3.connect(tmp_path / "new.db", autocommit=True)
     try:
-        assert migrate(conn) == [1, 2, 3]
+        assert migrate(conn) == list(range(1, LATEST + 1))
         assert columns(conn, "tasks")[-2:] == ["profile", "is_deferrable"]
         assert "quota_usage" in names(conn, "table")
     finally:
@@ -184,7 +184,7 @@ def test_0002_applies_to_an_empty_database(tmp_path: Path) -> None:
 def test_0002_keeps_v1_rows_and_fills_defaults(tmp_path: Path) -> None:
     conn = v1_database(tmp_path / "v1.db")
     try:
-        assert migrate(conn) == [2, 3]
+        assert migrate(conn) == list(range(2, LATEST + 1))
         row = conn.execute(
             "SELECT profile, is_deferrable, status FROM tasks WHERE id = ?", ("T1",)
         ).fetchone()
@@ -425,7 +425,7 @@ def test_v2_database_with_rows_upgrades_to_v3_after_a_backup(
     conn = v2_database(tmp_path / "arpeggio.db")
     try:
         assert schema_version(conn) == 2
-        assert migrate(conn) == [3]
+        assert migrate(conn, packaged_migrations()[:3]) == [3]
         assert "deferrable" not in columns(conn, "tasks")
         rows = conn.execute("SELECT id, profile, is_deferrable FROM tasks ORDER BY id").fetchall()
         assert [tuple(row) for row in rows] == [("T1", "unknown", 0), ("T2", "free", 1)]
@@ -441,3 +441,19 @@ def test_v2_database_with_rows_upgrades_to_v3_after_a_backup(
         assert columns(copy, "tasks")[-1] == "deferrable"
     finally:
         copy.close()
+
+
+def test_v3_database_with_steps_upgrades_to_v4(tmp_path: Path) -> None:
+    conn = v1_database(tmp_path / "arpeggio.db")
+    try:
+        migrate(conn, packaged_migrations()[:3])
+        assert migrate(conn) == [4]
+        assert columns(conn, "steps")[-2:] == ["provider", "prompt_overhead_tokens"]
+        row = conn.execute(
+            "SELECT provider, prompt_overhead_tokens FROM steps WHERE id = 'S1'"
+        ).fetchone()
+        assert tuple(row) == (None, None)
+        indexes = {r[1] for r in conn.execute("PRAGMA index_list(steps)")}
+        assert "idx_steps_provider" in indexes
+    finally:
+        conn.close()

@@ -125,8 +125,11 @@ CREATE TABLE steps (
     price_window          TEXT,                 -- 'peak' | 'offpeak' | 'flat'
     price_multiplier      REAL NOT NULL DEFAULT 1.0,
     price_cache_hit_per_m REAL,                 -- USD per 1M cache-hit input tokens at call time
+    provider               TEXT,                -- provider name from config (model calls)
+    prompt_overhead_tokens INTEGER,             -- input_tokens - ceil(chars / 4) of the prompt sent, floored at 0
     UNIQUE (attempt_id, seq)
 );
+CREATE INDEX idx_steps_provider ON steps(provider, created_at);
 
 CREATE TABLE verdicts (
     id              TEXT PRIMARY KEY,
@@ -233,6 +236,7 @@ CREATE TABLE schema_version (
 - The token and cost totals on `attempts` are the one exception to the rule below. Each step updates them in the same transaction that inserts the step, because live cost is needed while the attempt runs (CLI-02, CST-03). A test keeps them equal to `SUM` over `steps`.
 - Repositories exist for `repos`, `tasks`, `attempts` and `steps`. The other tables, `quota_usage` included (first used in M1.11), get theirs in the milestone that first writes them.
 - `cached_tokens` counts cache-hit input tokens, which are priced at `price_cache_hit_per_m`.
+- `steps.prompt_overhead_tokens` is how many input tokens a provider billed beyond our own estimate of the prompt we sent: `input_tokens - ceil(characters / 4)`, floored at 0. It is set only on model calls whose usage the provider reported, so estimated steps leave it `NULL`. The spend guard reads the highest value among the last 20 such steps for the same provider and model key (`max_prompt_overhead`).
 - A model call's price fields (`price_in_per_m`, `price_cache_hit_per_m`, `price_out_per_m`, `price_window`, `price_multiplier`) are the snapshot taken when the request started. Calls to free models and loopback providers store zero prices and `cost_usd = 0`, with their real token counts. `cost_usd` is rounded to 8 decimal places.
 - `steps.payload_ref` points at a JSON artifact holding the request body (without headers), the HTTP status and the raw response. The step row keeps only a summary of at most 200 characters. A spend-guard refusal is a `message` step with `cost_usd = 0` and no tokens. A provider error that ends the attempt and reports no usage is also a `message` step with `cost_usd = 0`, and its artifact keeps the provider's error body.
 - The views below are not created yet. They arrive as a migration together with the first feature that reads them (baseline report in M0.6, dashboard in M1.9).
@@ -268,6 +272,7 @@ Other views to implement: `v_success_rate`, `v_escape_rate`, `v_route_stats` (pe
 |---|---|---|
 | `0001_initial.sql` | M0.2 | The v1 tables and indexes. |
 | `0002_budget_profiles.sql` | M0.2.5 | `tasks.profile` and `tasks.deferrable` (renamed in `0003`), `attempts.model_mismatch` and `attempts.deferred_until`, `steps.actual_model`, `steps.price_window`, `steps.price_multiplier` and `steps.price_cache_hit_per_m`, `eval_runs.profile`, `eval_results.quota_wait_s`, and the new `quota_usage` table. Existing rows get the defaults, so tasks and eval runs created before `0002` read `profile = 'unknown'`. |
+| `0004_prompt_overhead.sql` | M0.3 | `steps.provider` and `steps.prompt_overhead_tokens`, plus the index `idx_steps_provider`. Existing steps read `NULL` in both columns. |
 | `0003_rename_deferrable.sql` | M0.2.6 | Renames `tasks.deferrable` to `tasks.is_deferrable`. `DEFERRABLE` is an SQLite keyword, so the old name had to be quoted in every query. Position, type and default are unchanged. |
 
 ## Retention
