@@ -255,6 +255,8 @@ def test_overhead_alert_of_one_is_accepted(config_data: dict[str, Any]) -> None:
 
 def as_free_profile(data: dict[str, Any]) -> dict[str, Any]:
     data["budget"].update(profile="free", per_task_usd=0, per_day_usd=0, per_month_usd=0)
+    for spec in data["models"].values():
+        spec.update(free=True, price_in_per_m=0.0, price_out_per_m=0.0)
     return data
 
 

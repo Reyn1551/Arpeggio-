@@ -8,6 +8,7 @@ at fault. The field reference lives in docs/05-ROUTING-AND-COST.md.
 
 import re
 from collections.abc import Mapping
+from datetime import date, datetime
 from typing import Annotated, Any, Literal, Self
 from urllib.parse import urlsplit
 
@@ -219,15 +220,46 @@ class Provider(_Model):
         return self
 
 
+class Limits(_Model):
+    """Free-tier caps: requests and tokens per minute and per day."""
+
+    rpm: int | None = Field(default=None, gt=0)
+    rpd: int | None = Field(default=None, gt=0)
+    tpm: int | None = Field(default=None, gt=0)
+    tpd: int | None = Field(default=None, gt=0)
+
+
+_PRICES = ("price_in_per_m", "price_cache_hit_in_per_m", "price_out_per_m")
+
+
 class ModelSpec(_Model):
     provider: ProviderName
     model: str = Field(min_length=1)
-    price_in_per_m: float = Field(ge=0)
-    price_out_per_m: float = Field(ge=0)
     efforts: list[Effort] = Field(min_length=1)
+    # Opaque provider parameters per effort, passed to adapters as-is (CFG-08).
+    effort_params: dict[Effort, dict[str, Any]] = Field(default_factory=dict)
+    price_in_per_m: float = Field(ge=0)
+    # Filled from price_in_per_m when absent, so it is only None if validation fails.
+    price_cache_hit_in_per_m: float | None = Field(default=None, ge=0)
+    price_out_per_m: float = Field(ge=0)
+    free: bool = False
+    limits: Limits = Field(default_factory=Limits)
+    last_verified: date
+    response_model_aliases: list[Annotated[str, StringConstraints(min_length=1)]] = Field(
+        default_factory=list
+    )
 
     # Set by Config from the model key ("tier2.mid" -> 2).
     _tier: int = PrivateAttr()
+
+    @model_validator(mode="before")
+    @classmethod
+    def _default_cache_hit_price(cls, data: Any) -> Any:
+        if isinstance(data, dict) and "price_cache_hit_in_per_m" not in data:
+            price = data.get("price_in_per_m")
+            if isinstance(price, int | float) and not isinstance(price, bool):
+                return {**data, "price_cache_hit_in_per_m": price}
+        return data
 
     @field_validator("efforts")
     @classmethod
@@ -235,6 +267,53 @@ class ModelSpec(_Model):
         if len(set(value)) != len(value):
             raise PydanticCustomError("duplicate_effort", "efforts must not repeat")
         return value
+
+    @field_validator("response_model_aliases")
+    @classmethod
+    def _unique_aliases(cls, value: list[str]) -> list[str]:
+        if len(set(value)) != len(value):
+            raise PydanticCustomError("duplicate_alias", "aliases must not repeat")
+        return value
+
+    @field_validator("last_verified", mode="before")
+    @classmethod
+    def _parse_date(cls, value: Any) -> Any:
+        # TOML gives a date for `2026-10-07` and a str for "2026-10-07". Strict mode takes
+        # only the former, so parse the string here. A datetime is a date subclass: reject it.
+        if isinstance(value, datetime):
+            raise PydanticCustomError("date_only", "must be a date like 2026-10-07, without a time")
+        if isinstance(value, str):
+            try:
+                if re.fullmatch(r"\d{4}-\d{2}-\d{2}", value):
+                    return date.fromisoformat(value)
+            except ValueError:
+                pass
+            raise PydanticCustomError("date_format", "must be a date like 2026-10-07")
+        return value
+
+    @field_validator("last_verified")
+    @classmethod
+    def _not_in_future(cls, value: date) -> date:
+        if value > date.today():
+            raise PydanticCustomError("future_date", "must not be in the future")
+        return value
+
+    @model_validator(mode="after")
+    def _check_prices_and_params(self) -> Self:
+        problems: list[tuple[Loc, str]] = [
+            (("effort_params", effort), "effort is not in this model's efforts")
+            for effort in self.effort_params
+            if effort not in self.efforts
+        ]
+        cache_hit = self.price_cache_hit_in_per_m
+        if cache_hit is not None and cache_hit > self.price_in_per_m:
+            problems.append((("price_cache_hit_in_per_m",), "must be <= price_in_per_m"))
+        if self.free:
+            problems += [
+                ((name,), "must be 0 when free = true") for name in _PRICES if getattr(self, name)
+            ]
+        _raise_if_any("ModelSpec", problems)
+        return self
 
     @property
     def tier(self) -> int:
@@ -254,6 +333,8 @@ class Defaults(_Model):
 class RepoSettings(_Model):
     privacy_class: PrivacyClass = "private"
     provider_allow: list[ProviderName] | None = None
+    # Opt in to providers whose data_use is may_train or unknown (SAF-07).
+    allow_training_providers: bool = False
 
 
 class Config(_Model):
@@ -288,6 +369,9 @@ class Config(_Model):
                 )
             )
 
+        if self.budget.profile == "free":
+            problems += _free_profile_problems(self.models, self.providers)
+
         endpoints: set[tuple[str, str | None]] = set()
         for name, provider in self.providers.items():
             endpoint = (provider.kind, normalize_endpoint(provider.base_url))
@@ -303,6 +387,29 @@ class Config(_Model):
         for key, spec in self.models.items():
             spec._tier = int(key.split(".", 1)[0].removeprefix("tier"))
         return self
+
+
+def _free_profile_problems(
+    models: Mapping[str, ModelSpec], providers: Mapping[str, Provider]
+) -> list[tuple[Loc, str]]:
+    """Under the free profile every model must cost nothing (BUD-02)."""
+    problems: list[tuple[Loc, str]] = []
+    for key, spec in models.items():
+        provider = providers.get(spec.provider)
+        local = provider is not None and is_loopback_url(provider.base_url)
+        if not spec.free and not local:
+            problems.append(
+                (
+                    ("models", key, "free"),
+                    "must be true under profile 'free' (or use a local provider)",
+                )
+            )
+        problems += [
+            (("models", key, name), "must be 0 under profile 'free'")
+            for name in _PRICES
+            if getattr(spec, name)
+        ]
+    return problems
 
 
 _FRIENDLY_MESSAGES = {

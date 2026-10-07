@@ -41,6 +41,7 @@ provider = "deepseek"
 model    = "<provider-model-id>"
 price_in_per_m  = 0.0
 price_out_per_m = 0.0
+last_verified   = "2026-10-07"
 efforts  = ["low", "medium"]
 
 [models."tier2.mid"]
@@ -48,6 +49,7 @@ provider = "anthropic"
 model    = "<provider-model-id>"
 price_in_per_m  = 0.0
 price_out_per_m = 0.0
+last_verified   = "2026-10-07"
 efforts  = ["low", "medium", "high"]
 
 [models."tier3.frontier"]
@@ -55,6 +57,7 @@ provider = "anthropic"
 model    = "<provider-model-id>"
 price_in_per_m  = 0.0
 price_out_per_m = 0.0
+last_verified   = "2026-10-07"
 efforts  = ["medium", "high", "max"]
 
 # The route used to estimate what a task would have cost without routing.
