@@ -5,6 +5,7 @@ from pathlib import Path
 
 HOME_ENV_VAR = "ARPEGGIO_HOME"
 CONFIG_FILENAME = "config.toml"
+DB_FILENAME = "arpeggio.db"
 DOT_DIRNAME = ".arpeggio"
 RUNTIME_SUBDIRS: tuple[str, ...] = ("artifacts", "worktrees", "taste", "skills", "logs")
 
@@ -19,6 +20,11 @@ def arpeggio_home() -> Path:
 def global_config_path(home: Path | None = None) -> Path:
     """Return ``<home>/config.toml``."""
     return (home if home is not None else arpeggio_home()) / CONFIG_FILENAME
+
+
+def db_path(home: Path | None = None) -> Path:
+    """Return ``<home>/arpeggio.db``."""
+    return (home if home is not None else arpeggio_home()) / DB_FILENAME
 
 
 def repo_config_path(repo: Path) -> Path:

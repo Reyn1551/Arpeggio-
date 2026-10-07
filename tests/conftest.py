@@ -1,10 +1,13 @@
+import sqlite3
 import tomllib
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from importlib.resources import files
 from pathlib import Path
 from typing import Any
 
 import pytest
+
+from arpeggio_ai.store.db import open_db
 
 
 @pytest.fixture
@@ -26,6 +29,14 @@ def home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     path = tmp_path / "arpeggio-home"
     monkeypatch.setenv("ARPEGGIO_HOME", str(path))
     return path
+
+
+@pytest.fixture
+def db(tmp_path: Path) -> Iterator[sqlite3.Connection]:
+    """A migrated database in a temp dir. Closed afterwards: Windows locks open WAL files."""
+    conn = open_db(tmp_path / "test.db")
+    yield conn
+    conn.close()
 
 
 @pytest.fixture
