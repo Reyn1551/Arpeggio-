@@ -21,6 +21,7 @@ import pytest
 from arpeggio_ai.adapters import registry
 from arpeggio_ai.adapters.base import AdapterContext, AttemptSpec, Route
 from arpeggio_ai.config.loader import load_config
+from arpeggio_ai.core.errors import ConfigError
 from arpeggio_ai.core.secrets import reference_name
 from arpeggio_ai.orchestrator.attempts import run_attempt
 from arpeggio_ai.paths import artifacts_dir, db_path
@@ -111,7 +112,14 @@ def test_one_tiny_call(home: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         pytest.fail(str(error), pytrace=False)
 
     monkeypatch.setenv("ARPEGGIO_HOME", REAL_HOME)
-    config = load_config()
+    try:
+        config = load_config()
+    except ConfigError as error:
+        pytest.fail(
+            f"{error}\nCreate it with `uv run arpeggio init --profile <name>`, replace the"
+            " placeholder model ids, then run `uv run arpeggio config validate`.",
+            pytrace=False,
+        )
     monkeypatch.setenv("ARPEGGIO_HOME", str(home))
     model = config.models.get(model_key)
     assert model is not None, f"{model_key} is not in {REAL_HOME}/config.toml"
