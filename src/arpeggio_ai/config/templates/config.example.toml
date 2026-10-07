@@ -10,6 +10,7 @@
 # Spending limits in USD. per_day_usd must be at least per_task_usd, and
 # per_month_usd at least per_day_usd.
 [budget]
+profile        = "standard"  # free | micro | standard | pro
 per_task_usd   = 2.00
 per_day_usd    = 10.00
 per_month_usd  = 150.00

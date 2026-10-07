@@ -27,6 +27,7 @@ Effort = Literal["low", "medium", "high", "max"]
 AdapterName = Literal["claude_code", "opencode", "command_code", "api"]
 ProviderKind = Literal["anthropic", "openai_compatible"]
 PrivacyClass = Literal["public", "private", "client"]
+BudgetProfile = Literal["free", "micro", "standard", "pro"]
 
 ProviderName = Annotated[str, StringConstraints(pattern=r"^[a-z][a-z0-9_-]*$")]
 ModelKey = Annotated[str, StringConstraints(pattern=r"^tier[1-3]\.[a-z0-9_-]+$")]
@@ -66,18 +67,42 @@ class _Model(BaseModel):
 
 
 class Budget(_Model):
-    per_task_usd: float = Field(gt=0)
-    per_day_usd: float = Field(gt=0)
-    per_month_usd: float = Field(gt=0)
-    overhead_alert: float = Field(gt=0, le=1)
+    profile: BudgetProfile
+    per_task_usd: float = Field(ge=0)
+    per_day_usd: float = Field(ge=0)
+    per_month_usd: float = Field(ge=0)
+    prepaid_balance_usd: float | None = Field(default=None, gt=0)
+    reserve_usd: float = Field(default=0.10, ge=0)
+    overhead_alert: float = Field(default=0.10, gt=0, le=1)
+    max_quota_wait_s: int = Field(default=120, ge=0)
 
     @model_validator(mode="after")
-    def _check_order(self) -> Self:
+    def _check_profile_rules(self) -> Self:
         problems: list[tuple[Loc, str]] = []
-        if self.per_day_usd < self.per_task_usd:
-            problems.append((("per_day_usd",), "must be >= per_task_usd"))
-        if self.per_month_usd < self.per_day_usd:
-            problems.append((("per_month_usd",), "must be >= per_day_usd"))
+        amounts = ("per_task_usd", "per_day_usd", "per_month_usd")
+        if self.profile == "free":
+            problems += [
+                ((name,), "must be 0 under profile 'free'")
+                for name in amounts
+                if getattr(self, name) != 0
+            ]
+            if self.prepaid_balance_usd is not None:
+                problems.append((("prepaid_balance_usd",), "not allowed under profile 'free'"))
+        else:
+            problems += [
+                ((name,), f"must be > 0 under profile '{self.profile}'")
+                for name in amounts
+                if getattr(self, name) == 0
+            ]
+            if self.per_day_usd < self.per_task_usd:
+                problems.append((("per_day_usd",), "must be >= per_task_usd"))
+            if self.per_month_usd < self.per_day_usd:
+                problems.append((("per_month_usd",), "must be >= per_day_usd"))
+        if self.profile == "micro":
+            if self.prepaid_balance_usd is None:
+                problems.append((("prepaid_balance_usd",), "required under profile 'micro'"))
+            elif self.reserve_usd >= self.prepaid_balance_usd:
+                problems.append((("reserve_usd",), "must be < prepaid_balance_usd"))
         _raise_if_any("Budget", problems)
         return self
 

@@ -250,6 +250,104 @@ def test_overhead_alert_of_one_is_accepted(config_data: dict[str, Any]) -> None:
     assert parse_config(config_data).budget.overhead_alert == 1.0
 
 
+# Budget profiles (BUD-01)
+
+
+def as_free_profile(data: dict[str, Any]) -> dict[str, Any]:
+    data["budget"].update(profile="free", per_task_usd=0, per_day_usd=0, per_month_usd=0)
+    return data
+
+
+def as_micro_profile(data: dict[str, Any]) -> dict[str, Any]:
+    data["budget"].update(
+        profile="micro",
+        per_task_usd=0.2,
+        per_day_usd=0.5,
+        per_month_usd=2.0,
+        prepaid_balance_usd=2.0,
+    )
+    return data
+
+
+def test_budget_defaults(config_data: dict[str, Any]) -> None:
+    for name in ("reserve_usd", "overhead_alert", "max_quota_wait_s", "prepaid_balance_usd"):
+        config_data["budget"].pop(name, None)
+    budget = parse_config(config_data).budget
+    assert (budget.profile, budget.reserve_usd, budget.overhead_alert) == ("standard", 0.1, 0.1)
+    assert (budget.max_quota_wait_s, budget.prepaid_balance_usd) == (120, None)
+
+
+@pytest.mark.parametrize("profile", ["free", "micro", "standard", "pro", "Pro", "cheap", None])
+def test_profile_must_be_one_of_four(config_data: dict[str, Any], profile: str | None) -> None:
+    if profile is None:
+        del config_data["budget"]["profile"]
+        assert fields(config_data) == {"budget.profile": "required field is missing"}
+    elif profile in ("Pro", "cheap"):
+        config_data["budget"]["profile"] = profile
+        assert "budget.profile" in fields(config_data)
+    else:
+        if profile == "free":
+            as_free_profile(config_data)
+        elif profile == "micro":
+            as_micro_profile(config_data)
+        config_data["budget"]["profile"] = profile
+        assert parse_config(config_data).budget.profile == profile
+
+
+def test_free_profile_requires_zero_budgets(config_data: dict[str, Any]) -> None:
+    config_data["budget"]["profile"] = "free"
+    assert fields(config_data) == {
+        "budget.per_task_usd": "must be 0 under profile 'free'",
+        "budget.per_day_usd": "must be 0 under profile 'free'",
+        "budget.per_month_usd": "must be 0 under profile 'free'",
+    }
+
+
+def test_free_profile_rejects_prepaid_balance(config_data: dict[str, Any]) -> None:
+    as_free_profile(config_data)["budget"]["prepaid_balance_usd"] = 2.0
+    assert fields(config_data) == {"budget.prepaid_balance_usd": "not allowed under profile 'free'"}
+
+
+@pytest.mark.parametrize("profile", ["micro", "standard", "pro"])
+def test_paid_profiles_require_positive_budgets(config_data: dict[str, Any], profile: str) -> None:
+    as_micro_profile(config_data)["budget"].update(profile=profile, per_task_usd=0)
+    assert fields(config_data) == {"budget.per_task_usd": f"must be > 0 under profile '{profile}'"}
+
+
+def test_micro_profile_requires_prepaid_balance(config_data: dict[str, Any]) -> None:
+    del as_micro_profile(config_data)["budget"]["prepaid_balance_usd"]
+    assert fields(config_data) == {"budget.prepaid_balance_usd": "required under profile 'micro'"}
+
+
+@pytest.mark.parametrize("reserve", [2.0, 3.0])
+def test_micro_reserve_must_be_below_prepaid_balance(
+    config_data: dict[str, Any], reserve: float
+) -> None:
+    as_micro_profile(config_data)["budget"]["reserve_usd"] = reserve
+    assert fields(config_data) == {"budget.reserve_usd": "must be < prepaid_balance_usd"}
+
+
+def test_micro_profile_accepts_valid_budget(config_data: dict[str, Any]) -> None:
+    budget = parse_config(as_micro_profile(config_data)).budget
+    assert (budget.prepaid_balance_usd, budget.reserve_usd) == (2.0, 0.1)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [("prepaid_balance_usd", 0), ("reserve_usd", -0.1), ("max_quota_wait_s", -1)],
+)
+def test_out_of_range_new_budget_fields(
+    config_data: dict[str, Any], field: str, value: float
+) -> None:
+    as_micro_profile(config_data)["budget"][field] = value
+    assert f"budget.{field}" in fields(config_data)
+
+
+def test_max_quota_wait_must_be_an_integer(config_data: dict[str, Any]) -> None:
+    config_data["budget"]["max_quota_wait_s"] = 1.5
+    assert "budget.max_quota_wait_s" in fields(config_data)
+
+
 @pytest.mark.parametrize("value", ["2.0", True])
 def test_numbers_are_not_coerced_from_strings_or_bools(
     config_data: dict[str, Any], value: object
