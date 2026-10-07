@@ -250,6 +250,12 @@ def test_free_template_uses_placeholders_only() -> None:
         assert spec["free"] is True, key
 
 
+@pytest.mark.parametrize("name", TEMPLATES)
+def test_templates_state_behavioral_defaults_explicitly(name: str) -> None:
+    budget = tomllib.loads(template_bytes(name).decode("utf-8"))["budget"]
+    assert {"reserve_usd", "overhead_alert", "max_quota_wait_s"} <= set(budget)
+
+
 def test_every_template_says_what_it_expects() -> None:
     for name in TEMPLATES:
         header = template_bytes(name).decode("utf-8").split("\n\n", 1)[0]

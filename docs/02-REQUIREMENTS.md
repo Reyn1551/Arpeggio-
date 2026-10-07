@@ -213,4 +213,4 @@
 | NFR-09 | P1 | Scale | Handles ≥ 10,000 tasks and ≥ 1,000,000 steps in SQLite without dashboard queries exceeding 1 s. |
 | NFR-10 | P0 | Compliance | Adapters use only official interfaces (APIs, SDKs, official CLIs) in ways allowed by each provider's terms. |
 | NFR-11 | P0 | Onboarding | A new user on the `free` profile reaches a first verified task in ≤ 15 minutes from install, with zero spend. Checked by a timed walkthrough recorded before the v1 release. |
-| NFR-12 | P0 | Data, not code | Prices, limits, and model lists are data in config/templates, never code. Checked by a code search that finds no price or limit literals outside templates and tests. |
+| NFR-12 | P0 | Data, not code | Prices, limits, and model lists are data; validation defaults for behavioral settings may live in code if every template states them explicitly. Checked by a code search that finds no price or limit literals outside templates and tests, and by a test that every template states `reserve_usd`, `overhead_alert` and `max_quota_wait_s`. |

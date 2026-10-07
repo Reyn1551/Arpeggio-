@@ -18,6 +18,8 @@ profile          = "free"
 per_task_usd     = 0
 per_day_usd      = 0
 per_month_usd    = 0
+reserve_usd      = 0.10  # only used by the micro profile
+overhead_alert   = 0.10  # alert if Arpeggio's own overhead exceeds 10% of spend
 max_quota_wait_s = 120   # wait this long for a quota reset before switching route or pausing
 
 # Gemini API free tier, OpenAI-compatible endpoint.
@@ -114,3 +116,10 @@ counterfactual_route = { adapter = "api", model = "tier3.strong", effort = "high
 # [repo]
 # privacy_class            = "private"   # public, private or client
 # allow_training_providers = false       # true lets this repo use "unknown" providers
+
+# Global opt-in for private repos to providers whose data_use is not "no_training"
+# (SAF-07). A repo's own [repo] allow_training_providers wins, and client repos
+# ignore this value.
+#
+# [privacy]
+# allow_training_providers = false
