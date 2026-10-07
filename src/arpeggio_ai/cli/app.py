@@ -5,6 +5,7 @@ from typing import Annotated
 import typer
 
 from arpeggio_ai import __version__
+from arpeggio_ai.cli.commands.init import init_command
 from arpeggio_ai.cli.output import JSON_HELP, emit_json
 
 app = typer.Typer(
@@ -33,3 +34,6 @@ def main(
     if ctx.invoked_subcommand is None:
         typer.echo(ctx.get_help())
         raise typer.Exit()
+
+
+app.command("init")(init_command)
