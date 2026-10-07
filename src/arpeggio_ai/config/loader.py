@@ -21,6 +21,14 @@ def template_bytes(name: str) -> bytes:
     return files("arpeggio_ai.config").joinpath("templates", f"{name}.toml").read_bytes()
 
 
+def template_unknown_data_use(name: str) -> list[str]:
+    """Providers in the template whose data_use is "unknown" (the default)."""
+    providers = tomllib.loads(template_bytes(name).decode("utf-8")).get("providers", {})
+    return [
+        key for key, table in providers.items() if table.get("data_use", "unknown") == "unknown"
+    ]
+
+
 def template_env_vars(name: str) -> list[str]:
     """Environment variables the template's providers read their API keys from."""
     providers = tomllib.loads(template_bytes(name).decode("utf-8")).get("providers", {})
