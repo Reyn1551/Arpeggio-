@@ -78,6 +78,9 @@ A **task** has one or more **attempts**. Each attempt is one route executed in o
 | **Risk classifier** | Compute risk from signals (paths, diff size, irreversible commands, repo privacy class) and combine with a model estimate, taking the max. | v1 |
 | **Router** | Choose `(adapter, model, effort, verification_depth)`. Rule-based in v1, contextual bandit in v2. Handles fallback. | v1 / v2 |
 | **Cost governor** | Budgets, loop detection, cost recording, counterfactual cost, context diet, cascade gating. | v1 |
+| **Quota governor** | Tracks free-tier usage from config and response headers. Decides wait, switch or pause. | v1 |
+| **Pricing engine** | Computes cost from tokens, cache hits, and price windows. Schedules deferrable work. | v1 |
+| **Provider catalog** | Packaged profile templates with models, prices, limits, `last_verified`. | v1 |
 | **Executors (adapters)** | Run an attempt in a worktree through one agent or API; stream steps; report cost. | v1 (2), v2 (4) |
 | **Verifier** | Run done criteria; at `full` depth, also run the full suite and a structured model review. | v1 |
 | **Approval gate** | Intercept gated actions; queue them; resume or cancel on user decision. | v1 |
@@ -122,6 +125,7 @@ class StepEvent:
     output_tokens: int | None
     cached_tokens: int | None
     cost_usd: float | None
+    actual_model: str | None  # model named in the provider's response (RTE-11)
     cost_estimated: bool
 
 @dataclass
@@ -144,6 +148,10 @@ Notes:
 - `capabilities()` lets the router avoid routes an adapter cannot honor (for example, effort control or exact token reporting).
 - Adapters that wrap CLIs parse the CLI's structured/streaming output. Exact flags must be verified against each tool's current documentation at implementation time.
 - Approval-gated actions surface as `approval_request` events; the orchestrator pauses the stream until a decision arrives.
+
+## Gateways and local providers
+
+Gateways (OpenRouter, 9Router, LiteLLM) and local servers (Ollama) are configured as `openai_compatible` providers. Local ones may use plain `http` on a loopback address and need no API key. Arpeggio never relies on gateway-side fallback for learning data: each step records the model that actually answered, and a mismatch keeps the attempt out of router learning (RTE-11). Configure gateways with fallback disabled or a fixed model. See [ADR-0006](adr/0006-gateways-and-free-tier-ethics.md) and [Gateways and free tiers](05-ROUTING-AND-COST.md#gateways-and-free-tiers).
 
 ## Technology stack
 
@@ -182,7 +190,10 @@ arpeggio/
 │   ├── paths.py                   # ARPEGGIO_HOME and config file locations
 │   ├── config/                    # models.py (Pydantic schema), loader.py (read, merge, validate)
 │   │   └── templates/
-│   │       └── config.example.toml    # providers, tiers, prices, budgets (written by `arpeggio init`)
+│   │       ├── free.toml               # one template per budget profile, written by
+│   │       ├── micro-deepseek.toml     #   `arpeggio init --profile <name>`
+│   │       ├── standard.toml
+│   │       └── pro.toml
 │   ├── cli/                       # Typer app, output helpers, commands/
 │   ├── core/                      # errors.py, ids.py (ULID), clock.py (UTC timestamps), logs.py (JSON lines),
 │   │                              #   later task, attempt, lifecycle state machine, orchestrator
@@ -207,7 +218,7 @@ arpeggio/
     └── integration/
 ```
 
-The example config lives at `src/arpeggio_ai/config/templates/config.example.toml`, inside the package, so an installed `arpeggio init` can read it through `importlib.resources`.
+The profile templates (`free.toml`, `micro-deepseek.toml`, `standard.toml`, `pro.toml`) live in `src/arpeggio_ai/config/templates/`, inside the package, so an installed `arpeggio init` can read them through `importlib.resources`.
 
 ## Data and file locations
 
@@ -220,9 +231,10 @@ The example config lives at `src/arpeggio_ai/config/templates/config.example.tom
 | `~/.arpeggio/taste/` | Vendor-neutral taste rules (git repo) |
 | `~/.arpeggio/skills/` | Reusable skills (git repo) |
 | `~/.arpeggio/logs/YYYY-MM-DD.jsonl` | Structured logs, one JSON object per line and one file per UTC day (OBS-03) |
+| `~/.arpeggio/backups/` | Database copies taken before each schema migration, five newest kept |
 | `<repo>/.arpeggio/config.toml` | Per-repo overrides, deep-merged over the global config. The only file allowed a `[repo]` table (privacy class, provider allowlist). Checks are planned. |
 
-`~/.arpeggio` is the default home. Set `ARPEGGIO_HOME` to use another directory. `arpeggio init` creates the home and its `artifacts/`, `worktrees/`, `taste/`, `skills/` and `logs/` subdirectories with mode `0700` on POSIX, then creates or migrates `arpeggio.db`.
+`~/.arpeggio` is the default home. Set `ARPEGGIO_HOME` to use another directory. `arpeggio init` creates the home and its `artifacts/`, `worktrees/`, `taste/`, `skills/`, `logs/` and `backups/` subdirectories with mode `0700` on POSIX, then creates or migrates `arpeggio.db`.
 
 ## Key design decisions
 

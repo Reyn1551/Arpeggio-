@@ -55,4 +55,11 @@ def test_repo_config_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> No
 
 
 def test_runtime_subdirs() -> None:
-    assert paths.RUNTIME_SUBDIRS == ("artifacts", "worktrees", "taste", "skills", "logs")
+    assert paths.RUNTIME_SUBDIRS == (
+        "artifacts",
+        "worktrees",
+        "taste",
+        "skills",
+        "logs",
+        "backups",
+    )

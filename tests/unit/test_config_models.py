@@ -1,8 +1,10 @@
+import tomllib
 from typing import Any
 
 import pytest
 from pydantic import ValidationError
 
+from arpeggio_ai.config.loader import template_bytes
 from arpeggio_ai.config.models import INLINE_KEY_MESSAGE, Config, is_key_reference, parse_config
 from arpeggio_ai.core.errors import ConfigError, ConfigIssue
 
@@ -18,6 +20,14 @@ def fields(data: dict[str, Any]) -> dict[str | None, str]:
 
 
 # Template (case 1) and derived values
+
+
+@pytest.mark.parametrize("name", ["free", "micro-deepseek", "standard", "pro"])
+def test_every_packaged_template_validates(name: str) -> None:
+    text = template_bytes(name).decode("utf-8")
+    config = parse_config(tomllib.loads(text))
+    expected_profile = name.split("-", 1)[0]
+    assert config.budget.profile == expected_profile
 
 
 def test_packaged_template_validates(config_data: dict[str, Any]) -> None:
@@ -250,6 +260,106 @@ def test_overhead_alert_of_one_is_accepted(config_data: dict[str, Any]) -> None:
     assert parse_config(config_data).budget.overhead_alert == 1.0
 
 
+# Budget profiles (BUD-01)
+
+
+def as_free_profile(data: dict[str, Any]) -> dict[str, Any]:
+    data["budget"].update(profile="free", per_task_usd=0, per_day_usd=0, per_month_usd=0)
+    for spec in data["models"].values():
+        spec.update(free=True, price_in_per_m=0.0, price_out_per_m=0.0)
+    return data
+
+
+def as_micro_profile(data: dict[str, Any]) -> dict[str, Any]:
+    data["budget"].update(
+        profile="micro",
+        per_task_usd=0.2,
+        per_day_usd=0.5,
+        per_month_usd=2.0,
+        prepaid_balance_usd=2.0,
+    )
+    return data
+
+
+def test_budget_defaults(config_data: dict[str, Any]) -> None:
+    for name in ("reserve_usd", "overhead_alert", "max_quota_wait_s", "prepaid_balance_usd"):
+        config_data["budget"].pop(name, None)
+    budget = parse_config(config_data).budget
+    assert (budget.profile, budget.reserve_usd, budget.overhead_alert) == ("standard", 0.1, 0.1)
+    assert (budget.max_quota_wait_s, budget.prepaid_balance_usd) == (120, None)
+
+
+@pytest.mark.parametrize("profile", ["free", "micro", "standard", "pro", "Pro", "cheap", None])
+def test_profile_must_be_one_of_four(config_data: dict[str, Any], profile: str | None) -> None:
+    if profile is None:
+        del config_data["budget"]["profile"]
+        assert fields(config_data) == {"budget.profile": "required field is missing"}
+    elif profile in ("Pro", "cheap"):
+        config_data["budget"]["profile"] = profile
+        assert "budget.profile" in fields(config_data)
+    else:
+        if profile == "free":
+            as_free_profile(config_data)
+        elif profile == "micro":
+            as_micro_profile(config_data)
+        config_data["budget"]["profile"] = profile
+        assert parse_config(config_data).budget.profile == profile
+
+
+def test_free_profile_requires_zero_budgets(config_data: dict[str, Any]) -> None:
+    config_data["budget"]["profile"] = "free"
+    assert fields(config_data) == {
+        "budget.per_task_usd": "must be 0 under profile 'free'",
+        "budget.per_day_usd": "must be 0 under profile 'free'",
+        "budget.per_month_usd": "must be 0 under profile 'free'",
+    }
+
+
+def test_free_profile_rejects_prepaid_balance(config_data: dict[str, Any]) -> None:
+    as_free_profile(config_data)["budget"]["prepaid_balance_usd"] = 2.0
+    assert fields(config_data) == {"budget.prepaid_balance_usd": "not allowed under profile 'free'"}
+
+
+@pytest.mark.parametrize("profile", ["micro", "standard", "pro"])
+def test_paid_profiles_require_positive_budgets(config_data: dict[str, Any], profile: str) -> None:
+    as_micro_profile(config_data)["budget"].update(profile=profile, per_task_usd=0)
+    assert fields(config_data) == {"budget.per_task_usd": f"must be > 0 under profile '{profile}'"}
+
+
+def test_micro_profile_requires_prepaid_balance(config_data: dict[str, Any]) -> None:
+    del as_micro_profile(config_data)["budget"]["prepaid_balance_usd"]
+    assert fields(config_data) == {"budget.prepaid_balance_usd": "required under profile 'micro'"}
+
+
+@pytest.mark.parametrize("reserve", [2.0, 3.0])
+def test_micro_reserve_must_be_below_prepaid_balance(
+    config_data: dict[str, Any], reserve: float
+) -> None:
+    as_micro_profile(config_data)["budget"]["reserve_usd"] = reserve
+    assert fields(config_data) == {"budget.reserve_usd": "must be < prepaid_balance_usd"}
+
+
+def test_micro_profile_accepts_valid_budget(config_data: dict[str, Any]) -> None:
+    budget = parse_config(as_micro_profile(config_data)).budget
+    assert (budget.prepaid_balance_usd, budget.reserve_usd) == (2.0, 0.1)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [("prepaid_balance_usd", 0), ("reserve_usd", -0.1), ("max_quota_wait_s", -1)],
+)
+def test_out_of_range_new_budget_fields(
+    config_data: dict[str, Any], field: str, value: float
+) -> None:
+    as_micro_profile(config_data)["budget"][field] = value
+    assert f"budget.{field}" in fields(config_data)
+
+
+def test_max_quota_wait_must_be_an_integer(config_data: dict[str, Any]) -> None:
+    config_data["budget"]["max_quota_wait_s"] = 1.5
+    assert "budget.max_quota_wait_s" in fields(config_data)
+
+
 @pytest.mark.parametrize("value", ["2.0", True])
 def test_numbers_are_not_coerced_from_strings_or_bools(
     config_data: dict[str, Any], value: object
@@ -268,19 +378,174 @@ def test_base_url_required_for_openai_compatible(config_data: dict[str, Any]) ->
     }
 
 
-def test_base_url_forbidden_for_anthropic(config_data: dict[str, Any]) -> None:
-    config_data["providers"]["anthropic"]["base_url"] = "https://api.anthropic.com"
-    assert fields(config_data) == {
-        "providers.anthropic.base_url": "not allowed when kind = 'anthropic'"
-    }
+def test_base_url_allowed_for_anthropic_format_endpoints(config_data: dict[str, Any]) -> None:
+    config_data["providers"]["anthropic"]["base_url"] = "https://api.deepseek.com/anthropic"
+    config = parse_config(config_data)
+    assert config.providers["anthropic"].base_url == "https://api.deepseek.com/anthropic"
 
 
-@pytest.mark.parametrize("url", ["http://api.deepseek.com", "api.deepseek.com", "https://", ""])
-def test_base_url_must_be_https(config_data: dict[str, Any], url: str) -> None:
+HTTPS_MESSAGE = "must be an https:// URL (http:// only for localhost, 127.0.0.1 or [::1])"
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "http://api.deepseek.com",
+        "http://192.168.1.10:11434/v1",
+        "http://localhost.example.com",
+        "ftp://localhost",
+        "api.deepseek.com",
+        "https://",
+        "",
+        "https://api.deepseek .com",
+        "http://[::1",
+    ],
+)
+def test_base_url_must_be_https_or_loopback_http(config_data: dict[str, Any], url: str) -> None:
     config_data["providers"]["deepseek"]["base_url"] = url
+    assert fields(config_data) == {"providers.deepseek.base_url": HTTPS_MESSAGE}
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "http://localhost:11434/v1",
+        "http://127.0.0.1:4000",
+        "http://[::1]:8080/v1",
+        "HTTP://LOCALHOST",
+    ],
+)
+def test_loopback_http_is_accepted_without_api_key(config_data: dict[str, Any], url: str) -> None:
+    config_data["providers"]["local"] = {"kind": "openai_compatible", "base_url": url}
+    provider = parse_config(config_data).providers["local"]
+    assert (provider.base_url, provider.api_key) == (url, None)
+
+
+@pytest.mark.parametrize("url", ["https://api.groq.com/openai/v1", None])
+def test_api_key_required_for_non_loopback(config_data: dict[str, Any], url: str | None) -> None:
+    provider: dict[str, Any] = {"kind": "openai_compatible" if url else "anthropic"}
+    if url:
+        provider["base_url"] = url
+    config_data["providers"] = {"only": provider}
+    for spec in config_data["models"].values():
+        spec["provider"] = "only"
     assert fields(config_data) == {
-        "providers.deepseek.base_url": "must be a URL starting with https://"
+        "providers.only.api_key": "required unless base_url is a loopback address (localhost)"
     }
+
+
+# Provider gateway, data_use and pricing windows (CFG-05, CFG-07)
+
+
+def test_provider_defaults(config_data: dict[str, Any]) -> None:
+    provider = parse_config(config_data).providers["deepseek"]
+    assert (provider.gateway, provider.data_use, provider.pricing_windows) == (
+        False,
+        "unknown",
+        None,
+    )
+
+
+@pytest.mark.parametrize("data_use", ["no_training", "may_train", "unknown"])
+def test_data_use_values(config_data: dict[str, Any], data_use: str) -> None:
+    config_data["providers"]["deepseek"].update(data_use=data_use, gateway=True)
+    provider = parse_config(config_data).providers["deepseek"]
+    assert (provider.data_use, provider.gateway) == (data_use, True)
+
+
+def test_unknown_data_use_is_rejected(config_data: dict[str, Any]) -> None:
+    config_data["providers"]["deepseek"]["data_use"] = "never"
+    assert "providers.deepseek.data_use" in fields(config_data)
+
+
+def test_pricing_windows_round_trip(config_data: dict[str, Any]) -> None:
+    windows = {
+        "peak_utc": ["Mon-Fri 01:00-04:00", "Mon-Fri 06:00-10:00", "Sat 20:00-24:00"],
+        "offpeak_multiplier": 0.5,
+    }
+    config_data["providers"]["deepseek"]["pricing_windows"] = windows
+    parsed = parse_config(config_data).providers["deepseek"].pricing_windows
+    assert parsed is not None
+    assert (parsed.peak_utc, parsed.offpeak_multiplier) == (windows["peak_utc"], 0.5)
+
+
+@pytest.mark.parametrize(
+    ("window", "message"),
+    [
+        ("Mon-Fri 1:00-4:00", "must look like"),
+        ("Monday 01:00-04:00", "must look like"),
+        ("mon-fri 01:00-04:00", "must look like"),
+        ("Mon-Fri 01:00-04:00 UTC", "must look like"),
+        ("Fri-Mon 01:00-04:00", "day range must go forward"),
+        ("Mon-Mon 01:00-04:00", "day range must go forward"),
+        ("Mon 24:00-24:00", "times must be between"),
+        ("Mon 10:60-11:00", "times must be between"),
+        ("Mon 23:00-24:30", "times must be between"),
+        ("Mon 04:00-01:00", "start must be earlier than end"),
+        ("Mon 04:00-04:00", "start must be earlier than end"),
+    ],
+)
+def test_bad_peak_windows_are_rejected(
+    config_data: dict[str, Any], window: str, message: str
+) -> None:
+    config_data["providers"]["deepseek"]["pricing_windows"] = {
+        "peak_utc": ["Mon-Fri 01:00-04:00", window],
+        "offpeak_multiplier": 0.5,
+    }
+    found = fields(config_data)
+    assert list(found) == ["providers.deepseek.pricing_windows.peak_utc.1"]
+    assert message in found["providers.deepseek.pricing_windows.peak_utc.1"]
+
+
+def test_offpeak_multiplier_required_with_windows(config_data: dict[str, Any]) -> None:
+    config_data["providers"]["deepseek"]["pricing_windows"] = {"peak_utc": ["Mon 01:00-02:00"]}
+    assert fields(config_data) == {
+        "providers.deepseek.pricing_windows.offpeak_multiplier": "required when peak_utc is set"
+    }
+
+
+@pytest.mark.parametrize("multiplier", [0, 1.5, -0.5])
+def test_offpeak_multiplier_range(config_data: dict[str, Any], multiplier: float) -> None:
+    config_data["providers"]["deepseek"]["pricing_windows"] = {
+        "peak_utc": ["Mon 01:00-02:00"],
+        "offpeak_multiplier": multiplier,
+    }
+    assert "providers.deepseek.pricing_windows.offpeak_multiplier" in fields(config_data)
+
+
+# Duplicate providers (QTA-04)
+
+
+DUPLICATE = "duplicate provider endpoint; multiple accounts for the same provider are not supported"
+
+
+@pytest.mark.parametrize(
+    "url",
+    ["https://api.deepseek.com", "https://api.deepseek.com/", "HTTPS://API.DeepSeek.com"],
+)
+def test_duplicate_provider_endpoint_is_rejected(config_data: dict[str, Any], url: str) -> None:
+    config_data["providers"]["deepseek2"] = {
+        "kind": "openai_compatible",
+        "base_url": url,
+        "api_key": "env:SECOND_DEEPSEEK_KEY",
+    }
+    assert fields(config_data) == {"providers.deepseek2": DUPLICATE}
+
+
+def test_two_anthropic_providers_without_base_url_are_duplicates(
+    config_data: dict[str, Any],
+) -> None:
+    config_data["providers"]["anthropic2"] = {"kind": "anthropic", "api_key": "env:OTHER"}
+    assert fields(config_data) == {"providers.anthropic2": DUPLICATE}
+
+
+def test_same_url_with_different_kind_is_not_a_duplicate(config_data: dict[str, Any]) -> None:
+    config_data["providers"]["deepseek_anthropic"] = {
+        "kind": "anthropic",
+        "base_url": "https://api.deepseek.com",
+        "api_key": "env:DEEPSEEK_API_KEY",
+    }
+    assert "deepseek_anthropic" in parse_config(config_data).providers
 
 
 # Names and kinds

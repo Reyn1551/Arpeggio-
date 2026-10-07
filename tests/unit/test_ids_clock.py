@@ -4,7 +4,7 @@ from datetime import UTC, datetime, timedelta, timezone
 
 import pytest
 
-from arpeggio_ai.core.clock import format_utc, utc_now
+from arpeggio_ai.core.clock import format_utc, is_utc_timestamp, utc_now
 from arpeggio_ai.core.ids import new_id
 
 ULID = re.compile(r"[0-9A-HJKMNP-TV-Z]{26}")
@@ -68,3 +68,19 @@ def test_utc_now_format_and_value() -> None:
     assert re.fullmatch(r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z", value)
     parsed = datetime.strptime(value, "%Y-%m-%dT%H:%M:%S.%fZ").replace(tzinfo=UTC)
     assert abs(datetime.now(UTC) - parsed) < timedelta(seconds=5)
+
+
+@pytest.mark.parametrize(
+    ("value", "valid"),
+    [
+        ("2026-10-07T01:00:00.000Z", True),
+        (format_utc(datetime(2026, 2, 28, 23, 59, 59, 999000, tzinfo=UTC)), True),
+        ("2026-10-07T01:00:00Z", False),
+        ("2026-10-07 01:00:00.000Z", False),
+        ("2026-02-30T01:00:00.000Z", False),
+        ("2026-10-07T25:00:00.000Z", False),
+        ("", False),
+    ],
+)
+def test_is_utc_timestamp(value: str, valid: bool) -> None:
+    assert is_utc_timestamp(value) is valid

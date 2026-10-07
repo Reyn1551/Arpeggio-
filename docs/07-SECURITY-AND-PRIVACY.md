@@ -14,6 +14,9 @@ Arpeggio runs agents that execute shell commands on the user's machine and send 
 | Supply chain | Agent installs a typo-squatted package | Install commands require approval on `medium`/`high` risk; lockfiles diffed |
 | Runaway cost | Infinite loop, eval storm | Budgets, loop detection (see 05) |
 | ToS violation | Automating a subscription in unsupported ways | Official interfaces only (NFR-10) |
+| Free-tier provider trains on private code | A `private` repo routed to a free tier that uses submitted data for training | `data_use` per provider, enforced by privacy class (SAF-07) |
+| Gateway sees all prompts | Every request passes through a hosted gateway | Gateway is its own provider with its own `data_use` (SAF-08) |
+| Account suspension from ToS-violating gateway features | Multi-account rotation or MITM endpoints offered by a community gateway | Not supported (QTA-04, non-goal in [01](01-VISION-AND-GOALS.md#non-goals)) |
 
 ## Isolation
 
@@ -57,6 +60,13 @@ Each repo declares a privacy class in `<repo>/.arpeggio/config.toml`:
 | `client` | Code owned by a client or employer | Only providers explicitly listed in the repo's `provider_allow`; shadow evaluation and exploration to other providers disabled |
 
 Before using Arpeggio on employer or client code, confirm that sending that code to each configured provider is permitted by the relevant agreements and policies.
+
+## Free tiers and gateways
+
+- Every provider declares `data_use`: `no_training`, `may_train` or `unknown` (the default). Mark a provider `no_training` only after reading its current terms.
+- `private` and `client` repos only route to `no_training` providers. A repo can opt in to the others with `allow_training_providers = true` in its `.arpeggio/config.toml` (SAF-07). Do this only for code you are allowed to share that way.
+- A gateway counts as a provider of its own with its own `data_use`. When the upstream provider is known, the stricter of the two applies (SAF-08).
+- Arpeggio does not support quota evasion: no multi-account or multi-key rotation for one provider, no MITM or reverse-engineered endpoints, no reuse of subscription credentials outside official clients. Config rejects two providers with the same kind and endpoint (QTA-04). See [ADR-0006](adr/0006-gateways-and-free-tier-ethics.md).
 
 ## Local data
 

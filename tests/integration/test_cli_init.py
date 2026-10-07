@@ -13,13 +13,22 @@ from typer.testing import CliRunner
 
 from arpeggio_ai.cli.app import app
 from arpeggio_ai.cli.commands import init as init_module
-from arpeggio_ai.config.loader import example_config_bytes, load_config
+from arpeggio_ai.config.loader import TEMPLATES, load_config, template_bytes, template_env_vars
 from arpeggio_ai.core.logs import close_logging
 from arpeggio_ai.store.db import open_db
 from arpeggio_ai.store.repositories import create_task, ensure_repo
 
 runner = CliRunner()
-SUBDIRS = ["artifacts", "worktrees", "taste", "skills", "logs"]
+SUBDIRS = ["artifacts", "worktrees", "taste", "skills", "logs", "backups"]
+FREE_ENV = {"GEMINI_API_KEY": False, "GROQ_API_KEY": False, "OPENROUTER_API_KEY": False}
+
+
+@pytest.fixture(autouse=True)
+def no_api_keys(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Hide any real API keys on this machine, so env_expected is deterministic."""
+    for name in TEMPLATES:
+        for var in template_env_vars(name):
+            monkeypatch.delenv(var, raising=False)
 
 
 def init_json(*extra: str) -> tuple[int, dict[str, Any]]:
@@ -51,13 +60,15 @@ def test_init_creates_home_subdirs_and_config(home: Path) -> None:
     assert payload == {
         "ok": True,
         "home": str(home),
+        "profile": "free",
         "created": all_paths(home),
         "skipped": [],
         "backup": None,
+        "env_expected": FREE_ENV,
     }
     assert all((home / name).is_dir() for name in SUBDIRS)
-    assert (home / "config.toml").read_bytes() == example_config_bytes()
-    assert schema_version(home / "arpeggio.db") == 1
+    assert (home / "config.toml").read_bytes() == template_bytes("free")
+    assert schema_version(home / "arpeggio.db") == 2
     load_config()
 
 
@@ -100,7 +111,7 @@ def test_force_backs_up_existing_config_and_writes_fresh_one(home: Path) -> None
     assert backup.parent == home
     assert re.fullmatch(r"config\.toml\.bak\.\d{8}T\d{6}Z", backup.name)
     assert backup.read_text(encoding="utf-8") == "# my edits\n"
-    assert (home / "config.toml").read_bytes() == example_config_bytes()
+    assert (home / "config.toml").read_bytes() == template_bytes("free")
     assert payload["created"] == [str(home / "config.toml")]
     assert payload["skipped"] == [*dir_paths(home), str(home / "arpeggio.db")]
 
@@ -197,7 +208,7 @@ def test_deleting_the_database_and_rerunning_init_gives_a_working_empty_system(h
     try:
         assert conn.execute("SELECT COUNT(*) FROM repos").fetchone()[0] == 0
         repo = ensure_repo(conn, "/code/app", "app")
-        assert create_task(conn, repo.id, "t", "t").status == "intake"
+        assert create_task(conn, repo.id, "t", "t", profile="free").status == "intake"
     finally:
         conn.close()
 
@@ -227,9 +238,9 @@ def test_init_writes_json_lines_log(home: Path) -> None:
     entries = [json.loads(line) for line in log_file.read_text(encoding="utf-8").splitlines()]
     assert [e["event"] for e in entries] == ["store.migrated", "init.completed", "init.completed"]
     assert entries[0]["from_version"] == 0
-    assert entries[0]["to_version"] == 1
-    assert entries[1]["created_count"] == 8
-    assert entries[2]["skipped_count"] == 8
+    assert entries[0]["to_version"] == 2
+    assert entries[1]["created_count"] == 9
+    assert entries[2]["skipped_count"] == 9
 
 
 def test_newer_database_schema_is_an_error(home: Path) -> None:
@@ -244,3 +255,87 @@ def test_newer_database_schema_is_an_error(home: Path) -> None:
     assert result.exit_code == 1
     message = json.loads(result.stdout)["errors"][0]["message"]
     assert message.startswith("StoreError: database schema version 99 is newer")
+
+
+# Profiles (CLI-05)
+
+
+@pytest.mark.parametrize("profile", ["free", "micro-deepseek", "standard", "pro"])
+def test_profile_writes_matching_template(home: Path, profile: str) -> None:
+    code, payload = init_json("--profile", profile)
+    assert code == 0
+    assert payload["profile"] == profile
+    assert (home / "config.toml").read_bytes() == template_bytes(profile)
+    assert load_config().budget.profile == profile.split("-", 1)[0]
+
+
+@pytest.mark.parametrize("as_json", [True, False])
+def test_unknown_profile_exits_2_and_lists_valid_names(home: Path, as_json: bool) -> None:
+    result = runner.invoke(app, ["init", "--profile", "cheap", *(["--json"] if as_json else [])])
+    assert result.exit_code == 2
+    expected = "unknown profile 'cheap'. Valid: free, micro-deepseek, standard, pro"
+    if as_json:
+        assert json.loads(result.stdout) == {
+            "ok": False,
+            "errors": [{"file": "command line", "field": "--profile", "message": expected}],
+        }
+    else:
+        assert result.stdout == ""
+        assert expected in result.stderr
+    assert not home.exists()
+
+
+def test_env_expected_reports_names_only(home: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    secret = "value-that-must-not-be-printed"
+    monkeypatch.setenv("DEEPSEEK_API_KEY", secret)
+    code, payload = init_json("--profile", "micro-deepseek")
+    assert code == 0
+    assert payload["env_expected"] == {"DEEPSEEK_API_KEY": True}
+
+    human = runner.invoke(app, ["init", "--profile", "micro-deepseek"])
+    assert "DEEPSEEK_API_KEY  set" in human.stdout
+    assert secret not in human.stdout + human.stderr
+
+
+def test_empty_env_var_counts_as_not_set(home: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("GEMINI_API_KEY", "")
+    monkeypatch.setenv("GROQ_API_KEY", "x")
+    _, payload = init_json()
+    assert payload["env_expected"] == {**FREE_ENV, "GROQ_API_KEY": True}
+
+
+def test_human_output_names_profile_and_missing_keys(home: Path) -> None:
+    result = runner.invoke(app, ["init", "--profile", "standard"])
+    assert result.exit_code == 0
+    assert "Profile template: standard" in result.stdout
+    assert "ANTHROPIC_API_KEY  not set" in result.stdout
+    assert "DEEPSEEK_API_KEY  not set" in result.stdout
+
+
+def test_existing_config_is_kept_when_profile_differs(home: Path) -> None:
+    init_json("--profile", "standard")
+    result = runner.invoke(app, ["init", "--profile", "micro-deepseek"])
+    assert result.exit_code == 0
+    assert "config.toml already exists and was kept" in result.stdout
+    assert (home / "config.toml").read_bytes() == template_bytes("standard")
+
+
+def test_force_switches_profile_and_keeps_database(home: Path) -> None:
+    init_json()
+    conn = open_db(home / "arpeggio.db")
+    ensure_repo(conn, "/code/app", "app")
+    conn.close()
+
+    code, payload = init_json("--profile", "micro-deepseek", "--force")
+
+    assert code == 0
+    assert payload["profile"] == "micro-deepseek"
+    assert Path(payload["backup"]).read_bytes() == template_bytes("free")
+    assert (home / "config.toml").read_bytes() == template_bytes("micro-deepseek")
+    assert payload["env_expected"] == {"DEEPSEEK_API_KEY": False}
+    assert str(home / "arpeggio.db") in payload["skipped"]
+    conn = open_db(home / "arpeggio.db")
+    try:
+        assert conn.execute("SELECT COUNT(*) FROM repos").fetchone()[0] == 1
+    finally:
+        conn.close()

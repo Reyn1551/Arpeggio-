@@ -1,0 +1,88 @@
+# Arpeggio config: pro profile.
+#
+# For: several paid providers, so every tier has a second provider to fall back to.
+# Subscriptions only count through each provider's official clients.
+# Expects: ANTHROPIC_API_KEY, OPENAI_API_KEY and DEEPSEEK_API_KEY in the environment.
+#
+# Model ids and prices below are placeholders. Fill them from each provider's
+# pricing page and set last_verified to the day you checked. Prices and limits
+# change, so check them again from time to time. Check your edits with
+# `arpeggio config validate`.
+
+# Example limits in USD: set your own. per_task <= per_day <= per_month.
+[budget]
+profile        = "pro"
+per_task_usd   = 5.00
+per_day_usd    = 25.00
+per_month_usd  = 300.00
+overhead_alert = 0.10
+
+# data_use stays "unknown" until you have read each provider's terms.
+[providers.anthropic]
+kind     = "anthropic"
+api_key  = "env:ANTHROPIC_API_KEY"
+data_use = "unknown"
+
+[providers.openai]
+kind     = "openai_compatible"
+base_url = "https://api.openai.com/v1"
+api_key  = "env:OPENAI_API_KEY"
+data_use = "unknown"
+
+[providers.deepseek]
+kind     = "openai_compatible"
+base_url = "https://api.deepseek.com"
+api_key  = "env:DEEPSEEK_API_KEY"
+data_use = "unknown"
+
+# Prices are in USD per million tokens: fill them from the provider pricing page.
+[models."tier1.cheap"]
+provider        = "deepseek"
+model           = "<provider-model-id>"
+efforts         = ["low", "medium"]
+price_in_per_m  = 0.0
+price_out_per_m = 0.0
+last_verified   = "2026-10-07"
+
+[models."tier2.mid"]
+provider        = "anthropic"
+model           = "<provider-model-id>"
+efforts         = ["low", "medium", "high"]
+price_in_per_m  = 0.0
+price_out_per_m = 0.0
+last_verified   = "2026-10-07"
+
+[models."tier2.mid-openai"]
+provider        = "openai"
+model           = "<provider-model-id>"
+efforts         = ["low", "medium", "high"]
+price_in_per_m  = 0.0
+price_out_per_m = 0.0
+last_verified   = "2026-10-07"
+
+[models."tier3.frontier"]
+provider        = "anthropic"
+model           = "<provider-model-id>"
+efforts         = ["medium", "high", "max"]
+price_in_per_m  = 0.0
+price_out_per_m = 0.0
+last_verified   = "2026-10-07"
+
+[models."tier3.frontier-openai"]
+provider        = "openai"
+model           = "<provider-model-id>"
+efforts         = ["medium", "high", "max"]
+price_in_per_m  = 0.0
+price_out_per_m = 0.0
+last_verified   = "2026-10-07"
+
+[defaults]
+counterfactual_route = { adapter = "claude_code", model = "tier3.frontier", effort = "high" }
+
+# Per-repo settings belong in <repo>/.arpeggio/config.toml. A [repo] table in
+# this global file is rejected.
+#
+# [repo]
+# privacy_class            = "private"
+# provider_allow           = ["anthropic"]
+# allow_training_providers = false

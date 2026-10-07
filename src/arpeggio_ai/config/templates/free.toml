@@ -1,0 +1,116 @@
+# Arpeggio config: free profile.
+#
+# For: a $0 budget. Uses free API tiers and, if you run one, a local model server.
+# Expects: GEMINI_API_KEY, GROQ_API_KEY and OPENROUTER_API_KEY in the environment.
+# Delete a provider you do not use, together with the model that points at it.
+#
+# Before the first run, replace every "<free-model-id>" with a current free model
+# from that provider's model list, and fill in its limits from the provider's
+# rate-limit page. Free models, limits and terms change without notice, and some
+# providers only show limits inside their console. Update last_verified whenever
+# you check. Check your edits with `arpeggio config validate`.
+#
+# Free tiers may train on what you send them. data_use stays "unknown" until you have
+# read the provider's terms, and private repos only use "no_training" providers.
+
+[budget]
+profile          = "free"
+per_task_usd     = 0
+per_day_usd      = 0
+per_month_usd    = 0
+max_quota_wait_s = 120   # wait this long for a quota reset before switching route or pausing
+
+# Gemini API free tier, OpenAI-compatible endpoint.
+# Limits: https://ai.google.dev/gemini-api/docs/rate-limits (see your own in AI Studio)
+[providers.gemini]
+kind     = "openai_compatible"
+base_url = "https://generativelanguage.googleapis.com/v1beta/openai/"
+api_key  = "env:GEMINI_API_KEY"
+data_use = "unknown"
+
+# Groq free tier. Limits: https://console.groq.com/docs/rate-limits
+[providers.groq]
+kind     = "openai_compatible"
+base_url = "https://api.groq.com/openai/v1"
+api_key  = "env:GROQ_API_KEY"
+data_use = "unknown"
+
+# OpenRouter is a gateway. Use a free variant (a model id ending in ":free") and turn
+# off fallback routing, so the model that answers is the one you asked for.
+# Limits for free variants: https://openrouter.ai/docs/api-reference/limits
+[providers.openrouter]
+kind     = "openai_compatible"
+base_url = "https://openrouter.ai/api/v1"
+api_key  = "env:OPENROUTER_API_KEY"
+gateway  = true
+data_use = "unknown"
+
+# Tier 1: a fast free model for small jobs (intake, summaries, renames).
+[models."tier1.fast"]
+provider        = "groq"
+model           = "<free-model-id>"   # from the Groq model list
+efforts         = ["low", "medium"]
+free            = true
+price_in_per_m  = 0.0
+price_out_per_m = 0.0
+limits          = {}                  # fill rpm, rpd, tpm, tpd from the provider page
+last_verified   = "2026-10-07"        # update when you fill in the model and limits
+
+# Tier 2: the default free builder.
+[models."tier2.default"]
+provider        = "gemini"
+model           = "<free-model-id>"   # from the Gemini API model list
+efforts         = ["low", "medium", "high"]
+free            = true
+price_in_per_m  = 0.0
+price_out_per_m = 0.0
+limits          = {}                  # fill rpm, rpd, tpm, tpd from the provider page
+last_verified   = "2026-10-07"
+
+# Tier 3: the strongest free model you can find, for hard tasks and reviews.
+[models."tier3.strong"]
+provider        = "openrouter"
+model           = "<free-model-id>"   # an OpenRouter model id ending in ":free"
+efforts         = ["medium", "high", "max"]
+free            = true
+price_in_per_m  = 0.0
+price_out_per_m = 0.0
+limits          = {}                  # fill rpm, rpd, tpm, tpd from the provider page
+last_verified   = "2026-10-07"
+
+# The route used to estimate what a task would have cost without routing.
+[defaults]
+counterfactual_route = { adapter = "api", model = "tier3.strong", effort = "high" }
+
+# A local model server (Ollama). No API key, and nothing leaves your machine.
+# Uncomment, pull a model, and point a tier at it. Local models do not need
+# free = true under this profile, but their prices must stay 0.
+#
+# [providers.ollama]
+# kind     = "openai_compatible"
+# base_url = "http://localhost:11434/v1"
+# data_use = "no_training"
+#
+# [models."tier1.local"]
+# provider        = "ollama"
+# model           = "<local-model-name>"
+# efforts         = ["low", "medium"]
+# price_in_per_m  = 0.0
+# price_out_per_m = 0.0
+# last_verified   = "2026-10-07"
+
+# A local gateway (LiteLLM, 9Router or similar) running on your machine. Turn its
+# fallback off or pin the model, so Arpeggio can record which model answered.
+#
+# [providers.local_gateway]
+# kind     = "openai_compatible"
+# base_url = "http://127.0.0.1:4000/v1"
+# gateway  = true
+# data_use = "unknown"   # the gateway forwards to other providers: their terms apply
+
+# Per-repo settings belong in <repo>/.arpeggio/config.toml. A [repo] table in
+# this global file is rejected.
+#
+# [repo]
+# privacy_class            = "private"   # public, private or client
+# allow_training_providers = false       # true lets this repo use "unknown" providers

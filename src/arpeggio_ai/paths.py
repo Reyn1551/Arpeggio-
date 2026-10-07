@@ -7,7 +7,14 @@ HOME_ENV_VAR = "ARPEGGIO_HOME"
 CONFIG_FILENAME = "config.toml"
 DB_FILENAME = "arpeggio.db"
 DOT_DIRNAME = ".arpeggio"
-RUNTIME_SUBDIRS: tuple[str, ...] = ("artifacts", "worktrees", "taste", "skills", "logs")
+RUNTIME_SUBDIRS: tuple[str, ...] = (
+    "artifacts",
+    "worktrees",
+    "taste",
+    "skills",
+    "logs",
+    "backups",
+)
 
 
 def arpeggio_home() -> Path:
