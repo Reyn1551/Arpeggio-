@@ -19,7 +19,7 @@ from arpeggio_ai.store.db import open_db
 from arpeggio_ai.store.repositories import create_task, ensure_repo
 
 runner = CliRunner()
-SUBDIRS = ["artifacts", "worktrees", "taste", "skills", "logs"]
+SUBDIRS = ["artifacts", "worktrees", "taste", "skills", "logs", "backups"]
 FREE_ENV = {"GEMINI_API_KEY": False, "GROQ_API_KEY": False, "OPENROUTER_API_KEY": False}
 
 
@@ -239,8 +239,8 @@ def test_init_writes_json_lines_log(home: Path) -> None:
     assert [e["event"] for e in entries] == ["store.migrated", "init.completed", "init.completed"]
     assert entries[0]["from_version"] == 0
     assert entries[0]["to_version"] == 2
-    assert entries[1]["created_count"] == 8
-    assert entries[2]["skipped_count"] == 8
+    assert entries[1]["created_count"] == 9
+    assert entries[2]["skipped_count"] == 9
 
 
 def test_newer_database_schema_is_an_error(home: Path) -> None:

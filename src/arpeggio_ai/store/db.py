@@ -4,8 +4,9 @@ import logging
 import re
 import sqlite3
 from collections.abc import Iterator
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from importlib.resources import files
 from pathlib import Path
 
@@ -15,6 +16,9 @@ from arpeggio_ai.core.errors import StoreError
 log = logging.getLogger(__name__)
 
 BUSY_TIMEOUT_S = 5.0
+BACKUP_DIRNAME = "backups"
+MAX_BACKUPS = 5
+DIR_MODE = 0o700
 _MIGRATION_FILE = re.compile(r"(\d{4})_[a-z0-9_]+\.sql")
 
 
@@ -75,8 +79,85 @@ def schema_version(conn: sqlite3.Connection) -> int:
     return int(row[0] or 0)
 
 
+def _backup_stamp() -> str:
+    return f"{datetime.now(UTC):%Y%m%dT%H%M%SZ}"
+
+
+def _database_file(conn: sqlite3.Connection) -> Path | None:
+    """The file behind the ``main`` database, or None for an in-memory database."""
+    for row in conn.execute("PRAGMA database_list"):
+        if row[1] == "main":
+            return Path(row[2]) if row[2] else None
+    return None
+
+
+def _backup_pattern(db_name: str) -> re.Pattern[str]:
+    return re.compile(rf"{re.escape(db_name)}\.pre-v(\d+)\.(\d{{8}}T\d{{6}}Z)")
+
+
+def _rotate_backups(backup_dir: Path, db_name: str) -> None:
+    """Keep the MAX_BACKUPS newest backups. Only files matching the backup name are touched."""
+    pattern = _backup_pattern(db_name)
+    found = []
+    for entry in backup_dir.iterdir():
+        match = pattern.fullmatch(entry.name)
+        if match is not None and entry.is_file():
+            found.append((match[2], int(match[1]), entry))
+    found.sort(reverse=True)
+    for _, _, entry in found[MAX_BACKUPS:]:
+        entry.unlink()
+
+
+def backup_database(conn: sqlite3.Connection, from_version: int, to_version: int) -> Path | None:
+    """Copy the database to ``backups/<name>.pre-v<to>.<UTC stamp>`` before migrating.
+
+    Uses SQLite's online backup API, which is safe with WAL, writes to a temporary name and
+    renames it when complete. Any failure raises StoreError, so the caller never migrates
+    without a backup. In-memory databases are not backed up.
+    """
+    db_file = _database_file(conn)
+    if db_file is None:
+        return None
+    backup_dir = db_file.parent / BACKUP_DIRNAME
+    target = backup_dir / f"{db_file.name}.pre-v{to_version}.{_backup_stamp()}"
+    partial = target.with_name(target.name + ".tmp")
+    try:
+        backup_dir.mkdir(mode=DIR_MODE, exist_ok=True)
+        if target.exists():
+            raise StoreError(f"backup {target} already exists. Wait a second and retry.")
+        partial.unlink(missing_ok=True)  # our own leftover from a crash, never a real backup
+        dest = sqlite3.connect(partial)
+        try:
+            conn.backup(dest)
+        finally:
+            dest.close()
+        partial.rename(target)
+    except (OSError, sqlite3.Error, StoreError) as error:
+        with suppress(OSError):
+            partial.unlink(missing_ok=True)
+        if isinstance(error, StoreError):
+            raise
+        raise StoreError(
+            f"could not back up the database before migrating to v{to_version}: {error}"
+        ) from error
+
+    try:
+        _rotate_backups(backup_dir, db_file.name)
+    except OSError as error:
+        # The backup exists, so migrating is still safe. Old backups just stay around.
+        log.warning("store.backup_rotation_failed", extra={"error": str(error)})
+    log.info(
+        "store.backup_created",
+        extra={"path": str(target), "from_version": from_version, "to_version": to_version},
+    )
+    return target
+
+
 def migrate(conn: sqlite3.Connection, migrations: list[Migration] | None = None) -> list[int]:
-    """Apply pending migrations, each in its own transaction. Returns the versions applied."""
+    """Apply pending migrations, each in its own transaction. Returns the versions applied.
+
+    A database that already has a schema is backed up first (see ``backup_database``).
+    """
     pending = packaged_migrations() if migrations is None else check_sequence(migrations)
     latest = pending[-1].version if pending else 0
     current = schema_version(conn)
@@ -86,6 +167,8 @@ def migrate(conn: sqlite3.Connection, migrations: list[Migration] | None = None)
         )
     if current == latest:
         return []
+    if current >= 1:
+        backup_database(conn, from_version=current, to_version=latest)
 
     applied = []
     for migration in pending:

@@ -1,3 +1,4 @@
+import json
 import sqlite3
 from pathlib import Path
 from typing import Any
@@ -5,6 +6,8 @@ from typing import Any
 import pytest
 
 from arpeggio_ai.core.errors import StoreError
+from arpeggio_ai.core.logs import close_logging, configure_logging
+from arpeggio_ai.store import db as db_module
 from arpeggio_ai.store.db import (
     Migration,
     check_sequence,
@@ -202,6 +205,7 @@ def test_0002_keeps_v1_rows_and_fills_defaults(tmp_path: Path) -> None:
 
 def test_failure_inside_0002_rolls_back_to_v1(tmp_path: Path) -> None:
     conn = v1_database(tmp_path / "v1.db")
+    backups = tmp_path / "backups"
     real = packaged_migrations()[1]
     broken = Migration(2, real.name, real.sql + "\nCREATE TABLE (oops;")
     try:
@@ -212,6 +216,7 @@ def test_failure_inside_0002_rolls_back_to_v1(tmp_path: Path) -> None:
         assert "model_mismatch" not in columns(conn, "attempts")
         assert "quota_usage" not in names(conn, "table")
         assert conn.execute("SELECT COUNT(*) FROM tasks").fetchone() == (1,)
+        assert [p.name.split(".")[2] for p in backups.iterdir()] == ["pre-v2"]
     finally:
         conn.close()
 
@@ -260,3 +265,144 @@ def test_schema_version_of_empty_database(tmp_path: Path) -> None:
         assert schema_version(conn) == 0
     finally:
         conn.close()
+
+
+# Backup before migrating
+
+
+STAMP = "20261007T120000Z"
+
+
+@pytest.fixture
+def fixed_stamp(monkeypatch: pytest.MonkeyPatch) -> str:
+    monkeypatch.setattr(db_module, "_backup_stamp", lambda: STAMP)
+    return STAMP
+
+
+def open_plain(path: Path) -> sqlite3.Connection:
+    return sqlite3.connect(path, autocommit=True)
+
+
+def test_backup_is_a_valid_v1_copy_taken_before_migrating(tmp_path: Path, fixed_stamp: str) -> None:
+    conn = v1_database(tmp_path / "arpeggio.db")
+    try:
+        assert migrate(conn) == [2]
+    finally:
+        conn.close()
+
+    backup = tmp_path / "backups" / f"arpeggio.db.pre-v2.{STAMP}"
+    assert [p.name for p in (tmp_path / "backups").iterdir()] == [backup.name]
+    copy = open_plain(backup)
+    try:
+        assert copy.execute("PRAGMA integrity_check").fetchone() == ("ok",)
+        assert schema_version(copy) == 1
+        assert "profile" not in columns(copy, "tasks")
+        assert copy.execute("SELECT id FROM tasks").fetchall() == [("T1",)]
+    finally:
+        copy.close()
+
+
+def test_no_backup_for_a_new_database(tmp_path: Path) -> None:
+    open_db(tmp_path / "arpeggio.db").close()
+    assert not (tmp_path / "backups").exists()
+
+
+def test_no_backup_when_nothing_is_pending(tmp_path: Path, fixed_stamp: str) -> None:
+    open_db(tmp_path / "arpeggio.db").close()
+    open_db(tmp_path / "arpeggio.db").close()
+    assert not (tmp_path / "backups").exists()
+
+
+def test_in_memory_database_is_not_backed_up(tmp_path: Path) -> None:
+    conn = sqlite3.connect(":memory:", autocommit=True)
+    try:
+        migrate(conn, packaged_migrations()[:1])
+        assert migrate(conn) == [2]
+    finally:
+        conn.close()
+    assert not (tmp_path / "backups").exists()
+
+
+def test_rotation_keeps_the_five_newest_and_ignores_other_files(
+    tmp_path: Path, fixed_stamp: str
+) -> None:
+    backups = tmp_path / "backups"
+    backups.mkdir()
+    old = [f"arpeggio.db.pre-v{1 + i % 2}.2026010{i}T000000Z" for i in range(1, 7)]
+    others = [
+        "notes.txt",
+        "arpeggio.db.pre-v2.20250101T000000Z.tmp",
+        "other.db.pre-v1.20200101T000000Z",
+        "arpeggio.db.pre-vX.20200101T000000Z",
+        "arpeggio.db.pre-v1.2020",
+    ]
+    for name in old + others:
+        (backups / name).write_text("x", encoding="utf-8")
+    conn = v1_database(tmp_path / "arpeggio.db")
+    try:
+        migrate(conn)
+    finally:
+        conn.close()
+
+    remaining = sorted(p.name for p in backups.iterdir())
+    kept = sorted([f"arpeggio.db.pre-v2.{STAMP}", *old[2:]])
+    assert remaining == sorted(kept + others)
+
+
+def test_failed_backup_aborts_the_migration(tmp_path: Path) -> None:
+    (tmp_path / "backups").write_text("a file where the backup directory should be")
+    conn = v1_database(tmp_path / "arpeggio.db")
+    try:
+        with pytest.raises(StoreError, match="could not back up the database before migrating"):
+            migrate(conn)
+        assert schema_version(conn) == 1
+        assert "profile" not in columns(conn, "tasks")
+    finally:
+        conn.close()
+
+
+def test_existing_backup_is_never_overwritten(tmp_path: Path, fixed_stamp: str) -> None:
+    backups = tmp_path / "backups"
+    backups.mkdir()
+    existing = backups / f"arpeggio.db.pre-v2.{STAMP}"
+    existing.write_text("older backup", encoding="utf-8")
+    conn = v1_database(tmp_path / "arpeggio.db")
+    try:
+        with pytest.raises(StoreError, match="already exists"):
+            migrate(conn)
+        assert schema_version(conn) == 1
+    finally:
+        conn.close()
+    assert existing.read_text(encoding="utf-8") == "older backup"
+    assert sorted(p.name for p in backups.iterdir()) == [existing.name]
+
+
+def test_backup_is_logged(tmp_path: Path, fixed_stamp: str) -> None:
+    log_file = configure_logging(tmp_path / "logs")
+    conn = v1_database(tmp_path / "arpeggio.db")
+    try:
+        migrate(conn)
+    finally:
+        conn.close()
+    close_logging()
+    entries = [json.loads(line) for line in log_file.read_text(encoding="utf-8").splitlines()]
+    backup = next(e for e in entries if e["event"] == "store.backup_created")
+    assert backup["path"] == str(tmp_path / "backups" / f"arpeggio.db.pre-v2.{STAMP}")
+    assert (backup["from_version"], backup["to_version"]) == (1, 2)
+    assert [e["event"] for e in entries] == [
+        "store.migrated",
+        "store.backup_created",
+        "store.migrated",
+    ]
+
+
+def test_stale_partial_backup_is_replaced(tmp_path: Path, fixed_stamp: str) -> None:
+    backups = tmp_path / "backups"
+    backups.mkdir()
+    (backups / f"arpeggio.db.pre-v2.{STAMP}.tmp").write_text("left by a crash")
+    conn = v1_database(tmp_path / "arpeggio.db")
+    try:
+        assert migrate(conn) == [2]
+    finally:
+        conn.close()
+    assert [p.name for p in backups.iterdir()] == [f"arpeggio.db.pre-v2.{STAMP}"]

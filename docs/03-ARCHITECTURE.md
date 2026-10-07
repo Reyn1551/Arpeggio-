@@ -231,9 +231,10 @@ The profile templates (`free.toml`, `micro-deepseek.toml`, `standard.toml`, `pro
 | `~/.arpeggio/taste/` | Vendor-neutral taste rules (git repo) |
 | `~/.arpeggio/skills/` | Reusable skills (git repo) |
 | `~/.arpeggio/logs/YYYY-MM-DD.jsonl` | Structured logs, one JSON object per line and one file per UTC day (OBS-03) |
+| `~/.arpeggio/backups/` | Database copies taken before each schema migration, five newest kept |
 | `<repo>/.arpeggio/config.toml` | Per-repo overrides, deep-merged over the global config. The only file allowed a `[repo]` table (privacy class, provider allowlist). Checks are planned. |
 
-`~/.arpeggio` is the default home. Set `ARPEGGIO_HOME` to use another directory. `arpeggio init` creates the home and its `artifacts/`, `worktrees/`, `taste/`, `skills/` and `logs/` subdirectories with mode `0700` on POSIX, then creates or migrates `arpeggio.db`.
+`~/.arpeggio` is the default home. Set `ARPEGGIO_HOME` to use another directory. `arpeggio init` creates the home and its `artifacts/`, `worktrees/`, `taste/`, `skills/`, `logs/` and `backups/` subdirectories with mode `0700` on POSIX, then creates or migrates `arpeggio.db`.
 
 ## Key design decisions
 
