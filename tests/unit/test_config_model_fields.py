@@ -351,3 +351,27 @@ def test_negative_prompt_overhead_is_rejected(
         "providers.deepseek.prompt_overhead_tokens",
         f"models.{MID}.prompt_overhead_tokens",
     }
+
+
+def test_check_env_defaults_to_empty(config_data: dict[str, Any]) -> None:
+    assert parse_config(config_data).repo.check_env == []
+
+
+def test_check_env_round_trip(config_data: dict[str, Any]) -> None:
+    config_data["repo"] = {"check_env": ["DATABASE_URL", "PYTHONHASHSEED"]}
+    assert parse_config(config_data).repo.check_env == ["DATABASE_URL", "PYTHONHASHSEED"]
+
+
+@pytest.mark.parametrize(
+    ("names", "field"),
+    [
+        (["BAD NAME"], "repo.check_env.0"),
+        (["1ABC"], "repo.check_env.0"),
+        (["A", "A"], "repo.check_env"),
+    ],
+)
+def test_bad_check_env_is_rejected(
+    config_data: dict[str, Any], names: list[str], field: str
+) -> None:
+    config_data["repo"] = {"check_env": names}
+    assert set(fields(config_data)) == {field}

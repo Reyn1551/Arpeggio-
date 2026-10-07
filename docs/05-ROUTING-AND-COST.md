@@ -337,6 +337,7 @@ The key is `tier1`, `tier2` or `tier3`, a dot, then lowercase letters, digits, `
 | `privacy_class` | string | `public`, `private` (default) or `client` |
 | `provider_allow` | list | Optional. Every name must be a provider above |
 | `allow_training_providers` | bool | Optional. `true` lets this repo use providers whose `data_use` is `may_train` or `unknown`, `false` forbids it even if the global value is `true`. Unset means the global `[privacy]` value for `private` repos and `false` for `client` repos (SAF-07) |
+| `check_env` | list of strings | Default empty. Names of extra environment variables that done-criteria checks may see, on top of the fixed allowlist (`PATH`, `HOME`, temp and locale variables, and on Windows `USERPROFILE`, `SYSTEMROOT`, `COMSPEC`, `PATHEXT`). Each name is letters, digits and `_`, with no repeats. A variable that any provider's `api_key` references is never passed, even if listed (SAF-02) |
 
 ## Learned router (v2): contextual bandit
 
