@@ -1,0 +1,59 @@
+# AGENTS.md
+
+Instructions for any coding agent (Claude Code, opencode, Command Code, or others) working on the Arpeggio repository. Read this before making changes.
+
+## What this project is
+
+Arpeggio is a personal AI workbench that orchestrates existing coding agents and models: intake → risk & routing → execution in isolated worktrees → verification → approval → learning. Start with `README.md`, then `docs/03-ARCHITECTURE.md`. Requirements have IDs (e.g. `RTE-03`) in `docs/02-REQUIREMENTS.md`; reference them in commits and PRs.
+
+## Commands
+
+```bash
+uv sync                          # install
+uv run pytest                    # all tests
+uv run pytest tests/unit -q      # fast tests
+uv run ruff check . && uv run ruff format --check .
+uv run mypy src/arpeggio_ai
+uv run arpeggio --help
+```
+
+Run lint, type check, and the relevant tests before declaring any task done. "Done" means these pass, not that the code looks right.
+
+## Hard rules
+
+1. **Never** commit secrets, API keys, or real provider credentials. Config uses `env:VAR` references only.
+2. **Never** weaken safety code (`src/arpeggio_ai/safety/`) or the approval gate to make a test pass. If a safety test fails, fix the cause or stop and ask.
+3. **Never** edit files under `evals/holdout/` or any `hidden_tests` fixtures, and never read them to inform a change.
+4. **Never** add a network call, telemetry, or external service without an ADR.
+5. Changes to `src/arpeggio_ai/routing/`, `src/arpeggio_ai/cost/`, `src/arpeggio_ai/verify/`, or `src/arpeggio_ai/intake/` must mention that the eval gate needs to run (`arpeggio eval gate`) in the PR description.
+6. Schema changes require a new numbered migration in `src/arpeggio_ai/store/migrations/` and an update to `docs/04-DATA-MODEL.md`.
+7. Architectural changes require a new ADR in `docs/adr/` (copy `0000-template.md`).
+
+## Code conventions
+
+- Python 3.12, full type hints; `mypy --strict` on `src/arpeggio_ai/core`, `routing`, `cost`, `safety`, `store`.
+- Async I/O (`asyncio`, `httpx`). No blocking calls in adapters or the orchestrator.
+- Core modules depend on interfaces, never on a concrete adapter. Adapters register in `adapters/registry.py`.
+- Configuration via Pydantic models; no magic constants for prices, tiers, thresholds, or budgets in code.
+- Money as `float` USD with explicit `_usd` suffix; tokens as `int` with `_tokens` suffix.
+- IDs are ULIDs; timestamps ISO-8601 UTC.
+- Errors: raise specific exceptions from `arpeggio_ai.core.errors`; never swallow exceptions silently.
+- Logging: structured JSON via the project logger; include `task_id` and `attempt_id`; never log secrets or full prompts at INFO level.
+- Keep functions small and pure where possible, especially in `routing/` and `cost/` (they are property-tested).
+
+## Testing conventions
+
+- Unit tests for every policy, risk, budget, and loop-detection rule; use `hypothesis` for rule logic.
+- Adapters must pass `tests/contract/` with a recorded or fake backend; no real provider calls in CI.
+- Integration tests use temporary git repos and a temporary SQLite DB.
+- A bug fix includes a test that fails before the fix.
+
+## Commit and PR style
+
+- Conventional commits: `feat(routing): add provider fallback (RTE-06)`.
+- One logical change per commit.
+- PR description: what, why, requirement IDs, how verified, eval gate needed (yes/no).
+
+## When unsure
+
+Prefer the simpler option that keeps behavior auditable. If a requirement is ambiguous, write the question in the PR description instead of guessing silently.

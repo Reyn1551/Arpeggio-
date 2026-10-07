@@ -1,0 +1,229 @@
+# 04 — Data Model
+
+Everything Arpeggio knows lives in one SQLite database (`~/.arpeggio/arpeggio.db`, WAL mode). Every feature — routing, learning, dashboard, evals — is a different read over the same tables. Get this schema right before writing feature code.
+
+## Entity overview
+
+```mermaid
+erDiagram
+    REPOS ||--o{ TASKS : contains
+    TASKS ||--o{ DONE_CRITERIA : has
+    TASKS ||--o{ ATTEMPTS : has
+    TASKS ||--o{ TASKS : "parent of"
+    ATTEMPTS ||--o{ STEPS : has
+    ATTEMPTS ||--o{ VERDICTS : has
+    ATTEMPTS ||--o{ APPROVALS : requests
+    TASKS ||--o| FEEDBACK : receives
+    PROPOSALS }o--o{ EVAL_RUNS : "gated by"
+    EVAL_RUNS ||--o{ EVAL_RESULTS : has
+```
+
+## Conventions
+
+- IDs are ULIDs stored as `TEXT` (sortable by time, safe to generate offline).
+- Timestamps are ISO-8601 UTC `TEXT`.
+- Money is `REAL` in USD with prices snapshotted at call time; never recompute historical cost from current prices.
+- JSON columns are `TEXT` validated by the application.
+- Large blobs (full tool outputs, diffs, logs) go to `~/.arpeggio/artifacts/`; the DB stores a relative path.
+- Rows are append-mostly. Status changes update a row; history of decisions is never deleted.
+
+## Schema (v1)
+
+```sql
+PRAGMA journal_mode = WAL;
+PRAGMA foreign_keys = ON;
+
+CREATE TABLE repos (
+    id              TEXT PRIMARY KEY,
+    path            TEXT NOT NULL UNIQUE,
+    name            TEXT NOT NULL,
+    privacy_class   TEXT NOT NULL DEFAULT 'private'
+                    CHECK (privacy_class IN ('public','private','client')),
+    provider_allow  TEXT,                      -- JSON array; NULL = all configured providers
+    created_at      TEXT NOT NULL
+);
+
+CREATE TABLE tasks (
+    id                  TEXT PRIMARY KEY,
+    repo_id             TEXT NOT NULL REFERENCES repos(id),
+    parent_id           TEXT REFERENCES tasks(id),
+    title               TEXT NOT NULL,
+    request             TEXT NOT NULL,          -- original user text
+    spec                TEXT,                   -- clarified spec after intake
+    category            TEXT,                   -- e.g. 'refactor','feature','bugfix','docs','data_pipeline','ml_experiment'
+    risk                TEXT CHECK (risk IN ('low','medium','high')),
+    risk_signals        TEXT,                   -- JSON: which signals fired and their weights
+    status              TEXT NOT NULL,          -- see lifecycle in 03-ARCHITECTURE
+    source              TEXT NOT NULL DEFAULT 'user'
+                        CHECK (source IN ('user','eval','shadow')),
+    budget_usd          REAL,
+    counterfactual_usd  REAL,                   -- estimated cost on default frontier route
+    created_at          TEXT NOT NULL,
+    finished_at         TEXT
+);
+CREATE INDEX idx_tasks_status   ON tasks(status);
+CREATE INDEX idx_tasks_category ON tasks(category, risk);
+
+CREATE TABLE done_criteria (
+    id          TEXT PRIMARY KEY,
+    task_id     TEXT NOT NULL REFERENCES tasks(id),
+    kind        TEXT NOT NULL CHECK (kind IN ('command','file_exists','metric','review')),
+    spec        TEXT NOT NULL,                  -- JSON, e.g. {"cmd":"pytest tests/x.py","expect_exit":0}
+    origin      TEXT NOT NULL CHECK (origin IN ('user','derived'))
+);
+
+CREATE TABLE attempts (
+    id              TEXT PRIMARY KEY,
+    task_id         TEXT NOT NULL REFERENCES tasks(id),
+    seq             INTEGER NOT NULL,           -- 1, 2, 3… within the task
+    adapter         TEXT NOT NULL,
+    model           TEXT NOT NULL,              -- logical id from config
+    provider_model  TEXT,                       -- concrete provider model string actually used
+    effort          TEXT NOT NULL,
+    verification    TEXT NOT NULL CHECK (verification IN ('light','full')),
+    route_reason    TEXT NOT NULL,              -- JSON: policy rule id or bandit sample
+    mode            TEXT NOT NULL DEFAULT 'normal'
+                    CHECK (mode IN ('normal','explore','shadow','tournament')),
+    worktree        TEXT,
+    branch          TEXT,
+    status          TEXT NOT NULL,              -- running|completed|timeout|error|paused|cancelled
+    cost_usd        REAL NOT NULL DEFAULT 0,
+    cost_estimated  INTEGER NOT NULL DEFAULT 0,
+    input_tokens    INTEGER NOT NULL DEFAULT 0,
+    output_tokens   INTEGER NOT NULL DEFAULT 0,
+    cached_tokens   INTEGER NOT NULL DEFAULT 0,
+    steps_count     INTEGER NOT NULL DEFAULT 0,
+    started_at      TEXT NOT NULL,
+    finished_at     TEXT,
+    checkpoint      TEXT,                       -- JSON for resume
+    UNIQUE (task_id, seq)
+);
+CREATE INDEX idx_attempts_route ON attempts(adapter, model, effort);
+
+CREATE TABLE steps (
+    id              TEXT PRIMARY KEY,
+    attempt_id      TEXT NOT NULL REFERENCES attempts(id),
+    seq             INTEGER NOT NULL,
+    kind            TEXT NOT NULL,              -- model_call|tool_call|tool_result|message|approval_request
+    summary         TEXT,                       -- short human-readable line
+    payload_ref     TEXT,                       -- path in artifacts/ for full content
+    input_tokens    INTEGER,
+    output_tokens   INTEGER,
+    cached_tokens   INTEGER,
+    price_in_per_m  REAL,                       -- USD per 1M input tokens at call time
+    price_out_per_m REAL,
+    cost_usd        REAL,
+    cost_estimated  INTEGER NOT NULL DEFAULT 0,
+    created_at      TEXT NOT NULL,
+    UNIQUE (attempt_id, seq)
+);
+
+CREATE TABLE verdicts (
+    id              TEXT PRIMARY KEY,
+    attempt_id      TEXT NOT NULL REFERENCES attempts(id),
+    criterion_id    TEXT REFERENCES done_criteria(id),
+    kind            TEXT NOT NULL CHECK (kind IN ('check','full_suite','model_review','user_review')),
+    passed          INTEGER NOT NULL,
+    detail          TEXT,                       -- JSON: exit code, failing tests, review issues
+    log_ref         TEXT,
+    cost_usd        REAL NOT NULL DEFAULT 0,    -- verification cost counts toward the task
+    created_at      TEXT NOT NULL
+);
+
+CREATE TABLE approvals (
+    id              TEXT PRIMARY KEY,
+    attempt_id      TEXT REFERENCES attempts(id),
+    task_id         TEXT NOT NULL REFERENCES tasks(id),
+    action          TEXT NOT NULL,              -- merge|force_push|delete_outside_worktree|migration|deploy|budget_extend|...
+    detail          TEXT NOT NULL,              -- JSON: exact command or diff summary
+    decision        TEXT CHECK (decision IN ('approved','rejected')),
+    decided_by      TEXT,                       -- 'user' (future: other actors)
+    requested_at    TEXT NOT NULL,
+    decided_at      TEXT
+);
+
+CREATE TABLE feedback (
+    task_id             TEXT PRIMARY KEY REFERENCES tasks(id),
+    accepted_attempt_id TEXT REFERENCES attempts(id),
+    post_agent_diff_ref TEXT,                   -- diff between agent output and what was merged
+    post_agent_lines    INTEGER,                -- changed lines by user after agent
+    interventions       INTEGER NOT NULL DEFAULT 0,
+    user_rating         INTEGER CHECK (user_rating BETWEEN 1 AND 5),
+    note                TEXT,
+    escaped             INTEGER NOT NULL DEFAULT 0,  -- set later if a revert/fix links back
+    escape_ref          TEXT,                   -- commit or issue that revealed the problem
+    failure_class       TEXT,                   -- reflector output for failed tasks (v2)
+    created_at          TEXT NOT NULL
+);
+
+CREATE TABLE proposals (
+    id              TEXT PRIMARY KEY,
+    kind            TEXT NOT NULL CHECK (kind IN ('policy','taste','skill','prompt')),
+    title           TEXT NOT NULL,
+    rationale       TEXT NOT NULL,              -- which tasks/failures motivated it
+    patch_ref       TEXT NOT NULL,              -- path to a git patch
+    status          TEXT NOT NULL DEFAULT 'pending'
+                    CHECK (status IN ('pending','gating','accepted','rejected')),
+    eval_run_id     TEXT REFERENCES eval_runs(id),
+    created_at      TEXT NOT NULL,
+    decided_at      TEXT
+);
+
+CREATE TABLE eval_runs (
+    id              TEXT PRIMARY KEY,
+    strategy        TEXT NOT NULL,              -- junior|middle|senior|arpeggio|<proposal id>
+    split           TEXT NOT NULL CHECK (split IN ('tuning','holdout','all')),
+    git_sha         TEXT NOT NULL,              -- harness version under test
+    config_hash     TEXT NOT NULL,
+    started_at      TEXT NOT NULL,
+    finished_at     TEXT,
+    summary         TEXT                        -- JSON: metrics with confidence intervals
+);
+
+CREATE TABLE eval_results (
+    eval_run_id     TEXT NOT NULL REFERENCES eval_runs(id),
+    eval_task       TEXT NOT NULL,              -- eval task file id
+    task_id         TEXT NOT NULL REFERENCES tasks(id),
+    solved          INTEGER NOT NULL,
+    cost_usd        REAL NOT NULL,
+    attempts        INTEGER NOT NULL,
+    duration_s      REAL NOT NULL,
+    PRIMARY KEY (eval_run_id, eval_task)
+);
+
+CREATE TABLE schema_version (
+    version     INTEGER PRIMARY KEY,
+    applied_at  TEXT NOT NULL
+);
+```
+
+## Derived metrics (as SQL views)
+
+Metrics are computed from data, never stored as mutable counters.
+
+```sql
+-- Cost per solved task, user tasks only, last 30 days
+CREATE VIEW v_cost_per_solved_30d AS
+SELECT
+    t.category,
+    COUNT(*) FILTER (WHERE t.status = 'merged')                    AS solved,
+    SUM(a.cost_usd) + COALESCE(SUM(v.cost_usd), 0)                 AS total_cost,
+    (SUM(a.cost_usd) + COALESCE(SUM(v.cost_usd), 0))
+        / NULLIF(COUNT(DISTINCT t.id) FILTER (WHERE t.status = 'merged'), 0) AS cost_per_solved
+FROM tasks t
+JOIN attempts a       ON a.task_id = t.id
+LEFT JOIN verdicts v  ON v.attempt_id = a.id
+WHERE t.source = 'user'
+  AND t.created_at >= datetime('now', '-30 days')
+GROUP BY t.category;
+```
+
+> Note: the join above double-counts when an attempt has several verdicts. The real implementation must aggregate attempts and verdicts in separate subqueries before joining. This is a known trap; cover it with a test.
+
+Other views to implement: `v_success_rate`, `v_escape_rate`, `v_route_stats` (per category × route: n, successes, mean cost — the bandit's input), `v_daily_spend`, `v_counterfactual_savings`.
+
+## Retention
+
+- DB rows: kept forever (they are the learning data).
+- Artifacts: full payloads older than 90 days MAY be compressed; never deleted for tasks referenced by eval runs or proposals.
+- Worktrees: removed after merge, reject, or cancel.
