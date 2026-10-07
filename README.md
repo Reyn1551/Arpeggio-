@@ -81,15 +81,19 @@ arpeggio dash                        # dashboard at http://localhost:7777
 
 ## Live smoke test
 
-The normal test run never touches the network. One opt-in test sends a single short prompt (`max_tokens` 16) to a real provider, using your real config (`~/.arpeggio/config.toml`, or the one under `$ARPEGGIO_HOME`), and records the call in a temporary database. **It costs real money unless the model is free.** On `micro-deepseek` a call costs a small fraction of a cent.
+The normal test run never touches the network. One opt-in test sends a single short prompt to a real provider, using your real config (`~/.arpeggio/config.toml`, or the one under `$ARPEGGIO_HOME`), and records the call in a temporary database. **It costs real money unless the model is free.** On `micro-deepseek` a call costs a small fraction of a cent.
 
 It runs only when all of these hold: you pass `-m live`, `ARPEGGIO_LIVE=1` is set, `ARPEGGIO_LIVE_MODEL` names a model key from your `config.toml`, and that provider's API key variable is set. Otherwise it is deselected or skipped.
+
+`ARPEGGIO_LIVE_MAX_TOKENS` sets the output cap for that call. It defaults to 16, and values above 1024 are rejected before anything is sent. Thinking models spend output tokens on reasoning before they answer, so with them set `ARPEGGIO_LIVE_MAX_TOKENS` to at least 512. In `micro-deepseek` that means `tier2.flash` and `tier3.pro`. `tier1.flash` has thinking off and works with the default.
 
 `micro-deepseek` profile, bash:
 
 ```bash
 export DEEPSEEK_API_KEY=...            # your key
 ARPEGGIO_LIVE=1 ARPEGGIO_LIVE_MODEL=tier1.flash uv run pytest -m live -s tests/live
+# a thinking model needs a larger cap:
+ARPEGGIO_LIVE=1 ARPEGGIO_LIVE_MODEL=tier2.flash ARPEGGIO_LIVE_MAX_TOKENS=512 uv run pytest -m live -s tests/live
 ```
 
 `micro-deepseek` profile, PowerShell:
@@ -97,6 +101,9 @@ ARPEGGIO_LIVE=1 ARPEGGIO_LIVE_MODEL=tier1.flash uv run pytest -m live -s tests/l
 ```powershell
 $env:DEEPSEEK_API_KEY = "..."          # your key
 $env:ARPEGGIO_LIVE = "1"; $env:ARPEGGIO_LIVE_MODEL = "tier1.flash"
+uv run pytest -m live -s tests/live
+# a thinking model needs a larger cap:
+$env:ARPEGGIO_LIVE_MODEL = "tier2.flash"; $env:ARPEGGIO_LIVE_MAX_TOKENS = "512"
 uv run pytest -m live -s tests/live
 ```
 
@@ -115,7 +122,7 @@ $env:ARPEGGIO_LIVE = "1"; $env:ARPEGGIO_LIVE_MODEL = "tier1.fast"
 uv run pytest -m live -s tests/live
 ```
 
-With `-s` the test prints the model that answered, the token counts, the price window and the recorded cost.
+With `-s` the test prints the requested model, the model that answered (`actual_model`), the mismatch flag, `finish_reason`, the prompt, cache-hit and completion tokens, the reasoning tokens when the provider reports them, the price window and the recorded cost.
 
 ## Names
 
