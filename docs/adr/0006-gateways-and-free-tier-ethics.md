@@ -31,3 +31,13 @@ Gateways and local servers are ordinary `openai_compatible` providers in config,
 ## Revisit when
 
 Providers change their free-tier terms materially, for example on training on submitted data or on rate limits.
+
+## Amendment (2026-10-07)
+
+Every packaged template ships its providers with `data_use = "unknown"`, so a per-repo opt-in alone would make a private repo unusable until each repo is edited. The opt-in now has two levels:
+
+- A global `[privacy] allow_training_providers` (default `false`) in `~/.arpeggio/config.toml`.
+- The repo's `[repo] allow_training_providers` wins when it is set, in either direction.
+- `client` repos ignore the global value. They opt in only with an explicit repo-level `true`, because client code is governed by agreements the global setting knows nothing about.
+
+`arpeggio init` prints one line when the chosen template has a provider with `data_use = "unknown"`, asking the user to check that provider's data policy. Enforcement in routing still arrives with M1.13.

@@ -64,7 +64,8 @@ Before using Arpeggio on employer or client code, confirm that sending that code
 ## Free tiers and gateways
 
 - Every provider declares `data_use`: `no_training`, `may_train` or `unknown` (the default). Mark a provider `no_training` only after reading its current terms.
-- `private` and `client` repos only route to `no_training` providers. A repo can opt in to the others with `allow_training_providers = true` in its `.arpeggio/config.toml` (SAF-07). Do this only for code you are allowed to share that way.
+- `private` and `client` repos only route to `no_training` providers unless they opt in (SAF-07). A repo opts in with `allow_training_providers = true` under `[repo]` in its `.arpeggio/config.toml`. Private repos that leave it unset follow the global `[privacy] allow_training_providers`, which defaults to `false`. Client repos ignore the global value and need the explicit repo-level `true`. Opt in only for code you are allowed to share that way.
+- `arpeggio init` prints a reminder when the chosen template has providers with `data_use = "unknown"`. It makes no network call, so checking each provider's data policy is up to you.
 - A gateway counts as a provider of its own with its own `data_use`. When the upstream provider is known, the stricter of the two applies (SAF-08).
 - Arpeggio does not support quota evasion: no multi-account or multi-key rotation for one provider, no MITM or reverse-engineered endpoints, no reuse of subscription credentials outside official clients. Config rejects two providers with the same kind and endpoint (QTA-04). See [ADR-0006](adr/0006-gateways-and-free-tier-ethics.md).
 

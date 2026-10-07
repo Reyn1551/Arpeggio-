@@ -105,7 +105,7 @@
 | SAF-04 | P0 | Content from web pages, issues, READMEs, and tool outputs MUST be treated as data. Instructions found there are not executed without user confirmation. | Prompt-injection eval tasks do not trigger the injected action. |
 | SAF-05 | P0 | Every approval request and decision MUST be logged with timestamp and actor. | `approvals` rows exist for every gated action. |
 | SAF-06 | P0 | Each repo MUST support a provider allowlist and a privacy class (`public`, `private`, `client`). | `client` repos only route to allowlisted providers. |
-| SAF-07 | P0 | Repos with privacy class `private` or `client` MUST NOT route to providers whose `data_use` is `may_train` or `unknown`, unless the repo config sets `allow_training_providers = true`. | Routing test for each class. |
+| SAF-07 | P0 | Repos with privacy class `private` or `client` MUST NOT route to providers whose `data_use` is `may_train` or `unknown`, unless they opt in. A `private` repo opts in with `[repo] allow_training_providers = true`, or, when the repo leaves it unset, through the global `[privacy] allow_training_providers = true`. A `client` repo ignores the global value and opts in only with an explicit repo-level `true`. | Routing test for each class, with the global value on and off and the repo value unset, true and false. A `client` repo never follows the global value. |
 | SAF-08 | P0 | A gateway is a separate provider for privacy purposes, with its own `data_use`. The strictest of gateway and upstream applies when the upstream is known. | Test that gateway `data_use` is enforced. |
 
 ### Storage & observability (OBS)
@@ -213,4 +213,4 @@
 | NFR-09 | P1 | Scale | Handles ≥ 10,000 tasks and ≥ 1,000,000 steps in SQLite without dashboard queries exceeding 1 s. |
 | NFR-10 | P0 | Compliance | Adapters use only official interfaces (APIs, SDKs, official CLIs) in ways allowed by each provider's terms. |
 | NFR-11 | P0 | Onboarding | A new user on the `free` profile reaches a first verified task in ≤ 15 minutes from install, with zero spend. Checked by a timed walkthrough recorded before the v1 release. |
-| NFR-12 | P0 | Data, not code | Prices, limits, and model lists are data in config/templates, never code. Checked by a code search that finds no price or limit literals outside templates and tests. |
+| NFR-12 | P0 | Data, not code | Prices, limits, and model lists are data; validation defaults for behavioral settings may live in code if every template states them explicitly. Checked by a code search that finds no price or limit literals outside templates and tests, and by a test that every template states `reserve_usd`, `overhead_alert` and `max_quota_wait_s`. |

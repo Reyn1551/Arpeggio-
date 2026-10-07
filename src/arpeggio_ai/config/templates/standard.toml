@@ -19,6 +19,8 @@ per_task_usd   = 2.00
 per_day_usd    = 10.00
 per_month_usd  = 150.00
 overhead_alert = 0.10        # alert if Arpeggio's own overhead exceeds 10% of spend
+reserve_usd    = 0.10        # only used by the micro profile
+max_quota_wait_s = 120       # wait this long for a quota reset before switching route
 
 # Providers. api_key names where the key lives: an environment variable
 # ("env:NAME") or an OS keychain entry ("keychain:NAME"). A pasted key fails
@@ -77,3 +79,10 @@ counterfactual_route = { adapter = "claude_code", model = "tier3.frontier", effo
 # privacy_class            = "private"       # public, private or client
 # provider_allow           = ["anthropic"]   # omit to allow every provider above
 # allow_training_providers = false           # true lets this repo use "unknown" providers
+
+# Global opt-in for private repos to providers whose data_use is not "no_training"
+# (SAF-07). A repo's own [repo] allow_training_providers wins, and client repos
+# ignore this value.
+#
+# [privacy]
+# allow_training_providers = false

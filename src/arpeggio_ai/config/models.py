@@ -330,11 +330,18 @@ class Defaults(_Model):
     counterfactual_route: CounterfactualRoute
 
 
+class PrivacySettings(_Model):
+    """Global ``[privacy]`` table. Only allowed in the global config."""
+
+    # Default opt-in for private repos to providers whose data_use is may_train or unknown.
+    allow_training_providers: bool = False
+
+
 class RepoSettings(_Model):
     privacy_class: PrivacyClass = "private"
     provider_allow: list[ProviderName] | None = None
-    # Opt in to providers whose data_use is may_train or unknown (SAF-07).
-    allow_training_providers: bool = False
+    # None means "use [privacy] allow_training_providers" (client repos never do).
+    allow_training_providers: bool | None = None
 
 
 class Config(_Model):
@@ -342,7 +349,21 @@ class Config(_Model):
     providers: dict[ProviderName, Provider] = Field(min_length=1)
     models: dict[ModelKey, ModelSpec] = Field(min_length=1)
     defaults: Defaults
+    privacy: PrivacySettings = Field(default_factory=PrivacySettings)
     repo: RepoSettings = Field(default_factory=RepoSettings)
+
+    def allows_training_providers(self) -> bool:
+        """Effective opt-in to may_train/unknown providers for this repo (SAF-07).
+
+        The repo value wins over the global [privacy] value. A client repo ignores the global
+        value and needs an explicit repo-level true.
+        """
+        repo_value = self.repo.allow_training_providers
+        if self.repo.privacy_class == "client":
+            return repo_value is True
+        if repo_value is not None:
+            return repo_value
+        return self.privacy.allow_training_providers
 
     @model_validator(mode="after")
     def _check_references(self) -> Self:

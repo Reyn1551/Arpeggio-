@@ -68,7 +68,7 @@ def test_init_creates_home_subdirs_and_config(home: Path) -> None:
     }
     assert all((home / name).is_dir() for name in SUBDIRS)
     assert (home / "config.toml").read_bytes() == template_bytes("free")
-    assert schema_version(home / "arpeggio.db") == 2
+    assert schema_version(home / "arpeggio.db") == 3
     load_config()
 
 
@@ -238,7 +238,7 @@ def test_init_writes_json_lines_log(home: Path) -> None:
     entries = [json.loads(line) for line in log_file.read_text(encoding="utf-8").splitlines()]
     assert [e["event"] for e in entries] == ["store.migrated", "init.completed", "init.completed"]
     assert entries[0]["from_version"] == 0
-    assert entries[0]["to_version"] == 2
+    assert entries[0]["to_version"] == 3
     assert entries[1]["created_count"] == 9
     assert entries[2]["skipped_count"] == 9
 
@@ -339,3 +339,37 @@ def test_force_switches_profile_and_keeps_database(home: Path) -> None:
         assert conn.execute("SELECT COUNT(*) FROM repos").fetchone()[0] == 1
     finally:
         conn.close()
+
+
+# data_use reminder (SAF-07)
+
+
+@pytest.mark.parametrize(
+    ("profile", "providers"),
+    [
+        ("free", "gemini, groq, openrouter"),
+        ("micro-deepseek", "deepseek"),
+        ("standard", "anthropic, deepseek"),
+        ("pro", "anthropic, openai, deepseek"),
+    ],
+)
+def test_init_reminds_about_unknown_data_use(home: Path, profile: str, providers: str) -> None:
+    result = runner.invoke(app, ["init", "--profile", profile])
+    lines = [line for line in result.stdout.splitlines() if 'data_use = "unknown"' in line]
+    assert lines == [
+        f'data_use = "unknown" for {providers}: verify each provider\'s data policy before '
+        "using it on private code, then set data_use in config.toml."
+    ]
+
+
+def test_no_reminder_when_every_provider_is_classified(
+    home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(init_module, "template_unknown_data_use", lambda name: [])
+    result = runner.invoke(app, ["init"])
+    assert "data_use" not in result.stdout
+
+
+def test_reminder_is_not_in_json_output(home: Path) -> None:
+    _, payload = init_json()
+    assert "data_use" not in json.dumps(payload)

@@ -16,6 +16,7 @@ from arpeggio_ai.config.loader import (
     TEMPLATES,
     template_bytes,
     template_env_vars,
+    template_unknown_data_use,
 )
 from arpeggio_ai.core.errors import ArpeggioError, ConfigError, ConfigIssue
 from arpeggio_ai.core.logs import configure_logging
@@ -146,6 +147,13 @@ def _print_human(result: InitResult) -> None:
         for name, present in result.env_expected.items():
             state = ("set", "green") if present else ("not set", "yellow")
             out.print(Text.assemble("  " + name + "  ", state))
+    unknown = template_unknown_data_use(result.profile)
+    if unknown:
+        out.print(
+            f'data_use = "unknown" for {", ".join(unknown)}: verify each provider\'s data '
+            "policy before using it on private code, then set data_use in config.toml.",
+            markup=False,
+        )
     out.print("Next: fill in config.toml, then run `arpeggio config validate`.", markup=False)
 
 

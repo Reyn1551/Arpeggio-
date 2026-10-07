@@ -13,10 +13,11 @@ Goal: a store, one adapter, and a real baseline. Nothing smart yet.
 | M0.1 Skeleton (done 2026-10-07) | Repo, `uv`, CI (ruff, mypy, pytest), config loader with validation, `arpeggio init` | CFG-01..04, CLI-01 (init) |
 | M0.2 Store (done 2026-10-07) | SQLite schema v1, migrations, repositories, artifacts dir | OBS-01, OBS-03 |
 | M0.2.5 Budget profiles retrofit (done 2026-10-07) | `budget.profile` and the per-profile rules in the config schema, provider and model pricing fields, four packaged templates, `arpeggio init --profile`, migration 0002 (profile, deferral, model provenance, price windows, quota usage), database backup before migrating | CFG-05..10, BUD-01, QTA-04, CLI-05 (`init --profile`), NFR-12 |
+| M0.2.6 Decisions follow-up (done 2026-10-07) | Migration 0003 renames `tasks.deferrable` to `is_deferrable`, global `[privacy]` opt-in with repo and client precedence, `data_use` reminder in `init`, behavioral defaults stated in every template | SAF-07 (config part), NFR-12 |
 | M0.3 First adapter | Direct API adapter (OpenAI-compatible), cost recording per step | EXE-01, CST-01 |
 | M0.4 Worktrees + verifier | Worktree per attempt, done-criteria runner, verdicts | EXE-04, VER-01, VER-04 |
 | M0.5 Eval suite | ≥ 20 real tasks with hidden tests, tuning/holdout split | EVL-01, EVL-02 |
-| M0.6 Baseline | Baseline for the `free` and `micro` profiles: `junior`, `middle`, `senior` strategies and a first comparison report per profile | EVL-03, EVL-06 |
+| M0.6 Baseline | Baseline for the `free` and `micro` profiles: `junior`, `middle`, `senior` strategies and a first comparison report per profile. Adds the `eval_per_month_usd` budget field that caps eval spend | EVL-03, EVL-06 |
 
 **Exit criteria:** baseline report exists with success rate and cost per solved task for 3 strategies on the holdout set, with confidence intervals.
 

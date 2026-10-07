@@ -250,12 +250,49 @@ def test_free_profile_rejects_priced_local_models(config_data: dict[str, Any]) -
     }
 
 
-# Repo opt-in (SAF-07)
+# Training opt-in: global [privacy] and repo [repo] (SAF-07)
 
 
-def test_allow_training_providers(config_data: dict[str, Any]) -> None:
-    assert parse_config(config_data).repo.allow_training_providers is False
-    config_data["repo"] = {"privacy_class": "private", "allow_training_providers": True}
-    assert parse_config(config_data).repo.allow_training_providers is True
-    config_data["repo"]["allow_training_providers"] = "yes"
-    assert "repo.allow_training_providers" in fields(config_data)
+def test_opt_in_defaults(config_data: dict[str, Any]) -> None:
+    config = parse_config(config_data)
+    assert config.privacy.allow_training_providers is False
+    assert config.repo.allow_training_providers is None
+    assert config.allows_training_providers() is False
+
+
+@pytest.mark.parametrize(
+    ("privacy_class", "global_value", "repo_value", "expected"),
+    [
+        ("private", False, None, False),
+        ("private", True, None, True),
+        ("private", True, False, False),
+        ("private", False, True, True),
+        ("public", True, None, True),
+        ("client", True, None, False),
+        ("client", True, False, False),
+        ("client", False, True, True),
+    ],
+)
+def test_opt_in_precedence(
+    config_data: dict[str, Any],
+    privacy_class: str,
+    global_value: bool,
+    repo_value: bool | None,
+    expected: bool,
+) -> None:
+    config_data["privacy"] = {"allow_training_providers": global_value}
+    config_data["repo"] = {"privacy_class": privacy_class}
+    if repo_value is not None:
+        config_data["repo"]["allow_training_providers"] = repo_value
+    assert parse_config(config_data).allows_training_providers() is expected
+
+
+@pytest.mark.parametrize("table", ["privacy", "repo"])
+def test_opt_in_must_be_boolean(config_data: dict[str, Any], table: str) -> None:
+    config_data[table] = {"allow_training_providers": "yes"}
+    assert f"{table}.allow_training_providers" in fields(config_data)
+
+
+def test_unknown_privacy_field_is_rejected(config_data: dict[str, Any]) -> None:
+    config_data["privacy"] = {"allow_training": True}
+    assert fields(config_data) == {"privacy.allow_training": "unknown field"}

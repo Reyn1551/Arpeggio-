@@ -21,6 +21,14 @@ def template_bytes(name: str) -> bytes:
     return files("arpeggio_ai.config").joinpath("templates", f"{name}.toml").read_bytes()
 
 
+def template_unknown_data_use(name: str) -> list[str]:
+    """Providers in the template whose data_use is "unknown" (the default)."""
+    providers = tomllib.loads(template_bytes(name).decode("utf-8")).get("providers", {})
+    return [
+        key for key, table in providers.items() if table.get("data_use", "unknown") == "unknown"
+    ]
+
+
 def template_env_vars(name: str) -> list[str]:
     """Environment variables the template's providers read their API keys from."""
     providers = tomllib.loads(template_bytes(name).decode("utf-8")).get("providers", {})
@@ -117,6 +125,15 @@ def load_config(repo: Path | None = None) -> Config:
             )
         elif repo_path.exists():
             repo_raw = _read_into(repo_path, issues)
+            if repo_raw is not None and "privacy" in repo_raw:
+                issues.append(
+                    ConfigIssue(
+                        file=str(repo_path),
+                        field="privacy",
+                        message="[privacy] is only allowed in the global config. "
+                        "Use allow_training_providers under [repo] instead.",
+                    )
+                )
 
     if issues or global_raw is None:
         raise ConfigError(issues)
