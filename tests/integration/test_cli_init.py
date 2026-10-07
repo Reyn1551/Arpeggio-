@@ -68,7 +68,7 @@ def test_init_creates_home_subdirs_and_config(home: Path) -> None:
     }
     assert all((home / name).is_dir() for name in SUBDIRS)
     assert (home / "config.toml").read_bytes() == template_bytes("free")
-    assert schema_version(home / "arpeggio.db") == 2
+    assert schema_version(home / "arpeggio.db") == 3
     load_config()
 
 
@@ -238,7 +238,7 @@ def test_init_writes_json_lines_log(home: Path) -> None:
     entries = [json.loads(line) for line in log_file.read_text(encoding="utf-8").splitlines()]
     assert [e["event"] for e in entries] == ["store.migrated", "init.completed", "init.completed"]
     assert entries[0]["from_version"] == 0
-    assert entries[0]["to_version"] == 2
+    assert entries[0]["to_version"] == 3
     assert entries[1]["created_count"] == 9
     assert entries[2]["skipped_count"] == 9
 

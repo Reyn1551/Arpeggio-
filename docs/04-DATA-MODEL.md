@@ -29,7 +29,7 @@ erDiagram
 
 ## Schema
 
-The cumulative schema after every migration (currently `0001` and `0002`, see [Migration history](#migration-history)). Columns added by a later migration sit at the end of their table, in the order the migration adds them. A test builds this block in memory and compares it, column by column, with a database that ran all migrations.
+The cumulative schema after every migration (currently `0001` to `0003`, see [Migration history](#migration-history)). Columns added by a later migration sit at the end of their table, in the order the migration adds them. A test builds this block in memory and compares it, column by column, with a database that ran all migrations.
 
 ```sql
 PRAGMA journal_mode = WAL;
@@ -63,7 +63,7 @@ CREATE TABLE tasks (
     created_at          TEXT NOT NULL,
     finished_at         TEXT,
     profile             TEXT NOT NULL DEFAULT 'unknown',  -- free|micro|standard|pro, or 'unknown' before 0002
-    "deferrable"        INTEGER NOT NULL DEFAULT 0       -- quoted: DEFERRABLE is an SQLite keyword (CST-10)
+    is_deferrable       INTEGER NOT NULL DEFAULT 0       -- may wait for a cheaper price window (CST-10)
 );
 CREATE INDEX idx_tasks_status   ON tasks(status);
 CREATE INDEX idx_tasks_category ON tasks(category, risk);
@@ -265,7 +265,8 @@ Other views to implement: `v_success_rate`, `v_escape_rate`, `v_route_stats` (pe
 | File | Milestone | Change |
 |---|---|---|
 | `0001_initial.sql` | M0.2 | The v1 tables and indexes. |
-| `0002_budget_profiles.sql` | M0.2.5 | `tasks.profile` and `tasks.deferrable`, `attempts.model_mismatch` and `attempts.deferred_until`, `steps.actual_model`, `steps.price_window`, `steps.price_multiplier` and `steps.price_cache_hit_per_m`, `eval_runs.profile`, `eval_results.quota_wait_s`, and the new `quota_usage` table. Existing rows get the defaults, so tasks and eval runs created before `0002` read `profile = 'unknown'`. |
+| `0002_budget_profiles.sql` | M0.2.5 | `tasks.profile` and `tasks.deferrable` (renamed in `0003`), `attempts.model_mismatch` and `attempts.deferred_until`, `steps.actual_model`, `steps.price_window`, `steps.price_multiplier` and `steps.price_cache_hit_per_m`, `eval_runs.profile`, `eval_results.quota_wait_s`, and the new `quota_usage` table. Existing rows get the defaults, so tasks and eval runs created before `0002` read `profile = 'unknown'`. |
+| `0003_rename_deferrable.sql` | M0.2.6 | Renames `tasks.deferrable` to `tasks.is_deferrable`. `DEFERRABLE` is an SQLite keyword, so the old name had to be quoted in every query. Position, type and default are unchanged. |
 
 ## Retention
 

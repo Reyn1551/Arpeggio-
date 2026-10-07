@@ -265,13 +265,15 @@ def test_failed_step_write_leaves_no_step_and_no_totals(
 
 
 def test_task_stores_profile_and_deferrable(db: sqlite3.Connection, repo: Repo) -> None:
-    task = create_task(db, repo.id, "eval", "eval", profile="free", deferrable=True, source="eval")
-    assert (task.profile, task.deferrable) == ("free", True)
+    task = create_task(
+        db, repo.id, "eval", "eval", profile="free", is_deferrable=True, source="eval"
+    )
+    assert (task.profile, task.is_deferrable) == ("free", True)
     assert get_task(db, task.id) == task
 
 
 def test_task_defaults_to_not_deferrable(task: Task) -> None:
-    assert (task.profile, task.deferrable) == ("micro", False)
+    assert (task.profile, task.is_deferrable) == ("micro", False)
 
 
 @pytest.mark.parametrize("profile", ["unknown", "cheap", "Free", ""])
@@ -296,7 +298,7 @@ def test_rows_from_before_0002_read_profile_unknown(db: sqlite3.Connection, repo
     )
     old = get_task(db, "OLD")
     assert old is not None
-    assert (old.profile, old.deferrable) == ("unknown", False)
+    assert (old.profile, old.is_deferrable) == ("unknown", False)
 
 
 def test_model_mismatch_flag(db: sqlite3.Connection, attempt: Attempt) -> None:

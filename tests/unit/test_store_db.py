@@ -19,7 +19,7 @@ from arpeggio_ai.store.db import (
 )
 
 DOCS_SCHEMA = Path(__file__).parents[2] / "docs" / "04-DATA-MODEL.md"
-LATEST = 2
+LATEST = 3
 
 
 def names(conn: sqlite3.Connection, kind: str) -> set[str]:
@@ -174,8 +174,8 @@ def v1_database(path: Path) -> sqlite3.Connection:
 def test_0002_applies_to_an_empty_database(tmp_path: Path) -> None:
     conn = sqlite3.connect(tmp_path / "new.db", autocommit=True)
     try:
-        assert migrate(conn) == [1, 2]
-        assert columns(conn, "tasks")[-2:] == ["profile", "deferrable"]
+        assert migrate(conn) == [1, 2, 3]
+        assert columns(conn, "tasks")[-2:] == ["profile", "is_deferrable"]
         assert "quota_usage" in names(conn, "table")
     finally:
         conn.close()
@@ -184,9 +184,9 @@ def test_0002_applies_to_an_empty_database(tmp_path: Path) -> None:
 def test_0002_keeps_v1_rows_and_fills_defaults(tmp_path: Path) -> None:
     conn = v1_database(tmp_path / "v1.db")
     try:
-        assert migrate(conn) == [2]
+        assert migrate(conn) == [2, 3]
         row = conn.execute(
-            'SELECT profile, "deferrable", status FROM tasks WHERE id = ?', ("T1",)
+            "SELECT profile, is_deferrable, status FROM tasks WHERE id = ?", ("T1",)
         ).fetchone()
         assert row == ("unknown", 0, "merged")
         assert conn.execute(
@@ -286,11 +286,11 @@ def open_plain(path: Path) -> sqlite3.Connection:
 def test_backup_is_a_valid_v1_copy_taken_before_migrating(tmp_path: Path, fixed_stamp: str) -> None:
     conn = v1_database(tmp_path / "arpeggio.db")
     try:
-        assert migrate(conn) == [2]
+        assert migrate(conn) == list(range(2, LATEST + 1))
     finally:
         conn.close()
 
-    backup = tmp_path / "backups" / f"arpeggio.db.pre-v2.{STAMP}"
+    backup = tmp_path / "backups" / f"arpeggio.db.pre-v{LATEST}.{STAMP}"
     assert [p.name for p in (tmp_path / "backups").iterdir()] == [backup.name]
     copy = open_plain(backup)
     try:
@@ -317,7 +317,7 @@ def test_in_memory_database_is_not_backed_up(tmp_path: Path) -> None:
     conn = sqlite3.connect(":memory:", autocommit=True)
     try:
         migrate(conn, packaged_migrations()[:1])
-        assert migrate(conn) == [2]
+        assert migrate(conn) == list(range(2, LATEST + 1))
     finally:
         conn.close()
     assert not (tmp_path / "backups").exists()
@@ -345,7 +345,7 @@ def test_rotation_keeps_the_five_newest_and_ignores_other_files(
         conn.close()
 
     remaining = sorted(p.name for p in backups.iterdir())
-    kept = sorted([f"arpeggio.db.pre-v2.{STAMP}", *old[2:]])
+    kept = sorted([f"arpeggio.db.pre-v{LATEST}.{STAMP}", *old[2:]])
     assert remaining == sorted(kept + others)
 
 
@@ -364,7 +364,7 @@ def test_failed_backup_aborts_the_migration(tmp_path: Path) -> None:
 def test_existing_backup_is_never_overwritten(tmp_path: Path, fixed_stamp: str) -> None:
     backups = tmp_path / "backups"
     backups.mkdir()
-    existing = backups / f"arpeggio.db.pre-v2.{STAMP}"
+    existing = backups / f"arpeggio.db.pre-v{LATEST}.{STAMP}"
     existing.write_text("older backup", encoding="utf-8")
     conn = v1_database(tmp_path / "arpeggio.db")
     try:
@@ -387,8 +387,8 @@ def test_backup_is_logged(tmp_path: Path, fixed_stamp: str) -> None:
     close_logging()
     entries = [json.loads(line) for line in log_file.read_text(encoding="utf-8").splitlines()]
     backup = next(e for e in entries if e["event"] == "store.backup_created")
-    assert backup["path"] == str(tmp_path / "backups" / f"arpeggio.db.pre-v2.{STAMP}")
-    assert (backup["from_version"], backup["to_version"]) == (1, 2)
+    assert backup["path"] == str(tmp_path / "backups" / f"arpeggio.db.pre-v{LATEST}.{STAMP}")
+    assert (backup["from_version"], backup["to_version"]) == (1, LATEST)
     assert [e["event"] for e in entries] == [
         "store.migrated",
         "store.backup_created",
@@ -399,10 +399,45 @@ def test_backup_is_logged(tmp_path: Path, fixed_stamp: str) -> None:
 def test_stale_partial_backup_is_replaced(tmp_path: Path, fixed_stamp: str) -> None:
     backups = tmp_path / "backups"
     backups.mkdir()
-    (backups / f"arpeggio.db.pre-v2.{STAMP}.tmp").write_text("left by a crash")
+    (backups / f"arpeggio.db.pre-v{LATEST}.{STAMP}.tmp").write_text("left by a crash")
     conn = v1_database(tmp_path / "arpeggio.db")
     try:
-        assert migrate(conn) == [2]
+        assert migrate(conn) == list(range(2, LATEST + 1))
     finally:
         conn.close()
-    assert [p.name for p in backups.iterdir()] == [f"arpeggio.db.pre-v2.{STAMP}"]
+    assert [p.name for p in backups.iterdir()] == [f"arpeggio.db.pre-v{LATEST}.{STAMP}"]
+
+
+def v2_database(path: Path) -> sqlite3.Connection:
+    """A database at schema v2 (before the rename) with a deferrable task."""
+    conn = v1_database(path)
+    migrate(conn, packaged_migrations()[:2])
+    conn.execute(
+        'INSERT INTO tasks (id, repo_id, title, request, status, created_at, profile, "deferrable")'
+        " VALUES ('T2', 'R1', 'eval', 'eval', 'intake', 'x', 'free', 1)"
+    )
+    return conn
+
+
+def test_v2_database_with_rows_upgrades_to_v3_after_a_backup(
+    tmp_path: Path, fixed_stamp: str
+) -> None:
+    conn = v2_database(tmp_path / "arpeggio.db")
+    try:
+        assert schema_version(conn) == 2
+        assert migrate(conn) == [3]
+        assert "deferrable" not in columns(conn, "tasks")
+        rows = conn.execute("SELECT id, profile, is_deferrable FROM tasks ORDER BY id").fetchall()
+        assert [tuple(row) for row in rows] == [("T1", "unknown", 0), ("T2", "free", 1)]
+    finally:
+        conn.close()
+
+    # pre-v2 comes from building the v2 fixture, pre-v3 from this upgrade.
+    names = sorted(b.name for b in (tmp_path / "backups").iterdir())
+    assert names == [f"arpeggio.db.pre-v2.{STAMP}", f"arpeggio.db.pre-v3.{STAMP}"]
+    copy = open_plain(tmp_path / "backups" / f"arpeggio.db.pre-v3.{STAMP}")
+    try:
+        assert schema_version(copy) == 2
+        assert columns(copy, "tasks")[-1] == "deferrable"
+    finally:
+        copy.close()

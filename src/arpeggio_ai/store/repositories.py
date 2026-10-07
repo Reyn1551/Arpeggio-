@@ -71,7 +71,7 @@ class Task:
     created_at: str
     finished_at: str | None
     profile: StoredProfile
-    deferrable: bool
+    is_deferrable: bool
 
 
 @dataclass(frozen=True, slots=True)
@@ -149,7 +149,7 @@ def _repo(row: sqlite3.Row) -> Repo:
 
 
 def _task(row: sqlite3.Row) -> Task:
-    return Task(**_row(row, json_cols=("risk_signals",), bool_cols=("deferrable",)))
+    return Task(**_row(row, json_cols=("risk_signals",), bool_cols=("is_deferrable",)))
 
 
 def _attempt(row: sqlite3.Row) -> Attempt:
@@ -208,7 +208,7 @@ def create_task(
     request: str,
     *,
     profile: BudgetProfile,
-    deferrable: bool = False,
+    is_deferrable: bool = False,
     status: TaskStatus = "intake",
     source: TaskSource = "user",
     parent_id: str | None = None,
@@ -228,7 +228,7 @@ def create_task(
         with transaction(conn):
             conn.execute(
                 "INSERT INTO tasks (id, repo_id, parent_id, title, request, category, status,"
-                ' source, budget_usd, created_at, profile, "deferrable")'
+                " source, budget_usd, created_at, profile, is_deferrable)"
                 " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     task_id,
@@ -242,7 +242,7 @@ def create_task(
                     budget_usd,
                     utc_now(),
                     profile,
-                    int(deferrable),
+                    int(is_deferrable),
                 ),
             )
     except sqlite3.IntegrityError as error:
