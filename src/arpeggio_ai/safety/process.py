@@ -14,9 +14,14 @@ Used for done-criteria checks and for every git command Arpeggio runs in a workt
   tree is killed the same way as on timeout. The temporary file is deleted in every case.
   Both limits are module constants for now and become config later.
 - **Timeout (EXE-06).** POSIX starts the child in a new session and kills its process
-  group. Windows starts it in a new process group and runs ``taskkill /T /F``, which walks
-  the tree by parent PID. A grandchild whose parent already exited is not reachable that
-  way (a Job Object would be). See docs/07-SECURITY-AND-PRIVACY.md.
+  group. Windows runs every child in its own Job Object with kill-on-close: the child
+  starts suspended (``CREATE_SUSPENDED``), is assigned to the job through a handle from
+  ``OpenProcess``, and only then resumes (``NtResumeProcess``), so no descendant can start
+  outside the job. On timeout or output limit the job is terminated. After a normal exit
+  anything still in the job is killed and logged as ``process.stragglers_killed``. If
+  Windows refuses a job, ``process.job_object_unavailable`` is logged once per run and the
+  older ``taskkill /T /F`` path is used, which cannot reach a grandchild whose parent
+  already exited. See ADR-0008 (amendment) and docs/07-SECURITY-AND-PRIVACY.md.
 """
 
 import asyncio
@@ -150,6 +155,224 @@ async def _kill_tree(pid: int) -> None:
             os.killpg(pid, signal.SIGKILL)  # the child leads its own session and group
 
 
+# Windows Job Objects (EXE-06). Every name below that touches ctypes.windll is only reached
+# when sys.platform == "win32", so mypy --platform linux and POSIX runs never see it.
+
+CREATE_SUSPENDED = 0x00000004
+_JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x00002000
+_JOB_OBJECT_BASIC_ACCOUNTING_INFORMATION = 1
+_JOB_OBJECT_EXTENDED_LIMIT_INFORMATION = 9
+_PROCESS_ACCESS = 0x0001 | 0x0100 | 0x0200 | 0x0800 | 0x1000  # terminate, set quota,
+# set information, suspend/resume, query limited information
+_job_unavailable_logged = False
+
+if sys.platform == "win32":
+    import ctypes
+    from ctypes import wintypes
+
+    _kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    _ntdll = ctypes.WinDLL("ntdll")
+
+    class _BasicLimit(ctypes.Structure):
+        _fields_ = [
+            ("PerProcessUserTimeLimit", ctypes.c_int64),
+            ("PerJobUserTimeLimit", ctypes.c_int64),
+            ("LimitFlags", wintypes.DWORD),
+            ("MinimumWorkingSetSize", ctypes.c_size_t),
+            ("MaximumWorkingSetSize", ctypes.c_size_t),
+            ("ActiveProcessLimit", wintypes.DWORD),
+            ("Affinity", ctypes.c_size_t),
+            ("PriorityClass", wintypes.DWORD),
+            ("SchedulingClass", wintypes.DWORD),
+        ]
+
+    class _IoCounters(ctypes.Structure):
+        _fields_ = [
+            (name, ctypes.c_uint64)
+            for name in ("Read", "Write", "Other", "ReadBytes", "WriteBytes", "OtherBytes")
+        ]
+
+    class _ExtendedLimit(ctypes.Structure):
+        _fields_ = [
+            ("BasicLimitInformation", _BasicLimit),
+            ("IoInfo", _IoCounters),
+            ("ProcessMemoryLimit", ctypes.c_size_t),
+            ("JobMemoryLimit", ctypes.c_size_t),
+            ("PeakProcessMemoryUsed", ctypes.c_size_t),
+            ("PeakJobMemoryUsed", ctypes.c_size_t),
+        ]
+
+    class _BasicAccounting(ctypes.Structure):
+        _fields_ = [
+            ("TotalUserTime", ctypes.c_int64),
+            ("TotalKernelTime", ctypes.c_int64),
+            ("ThisPeriodTotalUserTime", ctypes.c_int64),
+            ("ThisPeriodTotalKernelTime", ctypes.c_int64),
+            ("TotalPageFaultCount", wintypes.DWORD),
+            ("TotalProcesses", wintypes.DWORD),
+            ("ActiveProcesses", wintypes.DWORD),
+            ("TotalTerminatedProcesses", wintypes.DWORD),
+        ]
+
+    _kernel32.CreateJobObjectW.argtypes = [wintypes.LPVOID, wintypes.LPCWSTR]
+    _kernel32.CreateJobObjectW.restype = wintypes.HANDLE
+    _kernel32.SetInformationJobObject.argtypes = [
+        wintypes.HANDLE,
+        ctypes.c_int,
+        wintypes.LPVOID,
+        wintypes.DWORD,
+    ]
+    _kernel32.SetInformationJobObject.restype = wintypes.BOOL
+    _kernel32.QueryInformationJobObject.argtypes = [
+        wintypes.HANDLE,
+        ctypes.c_int,
+        wintypes.LPVOID,
+        wintypes.DWORD,
+        wintypes.LPDWORD,
+    ]
+    _kernel32.QueryInformationJobObject.restype = wintypes.BOOL
+    _kernel32.AssignProcessToJobObject.argtypes = [wintypes.HANDLE, wintypes.HANDLE]
+    _kernel32.AssignProcessToJobObject.restype = wintypes.BOOL
+    _kernel32.TerminateJobObject.argtypes = [wintypes.HANDLE, wintypes.UINT]
+    _kernel32.TerminateJobObject.restype = wintypes.BOOL
+    _kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    _kernel32.OpenProcess.restype = wintypes.HANDLE
+    _kernel32.TerminateProcess.argtypes = [wintypes.HANDLE, wintypes.UINT]
+    _kernel32.TerminateProcess.restype = wintypes.BOOL
+    _kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+    _kernel32.CloseHandle.restype = wintypes.BOOL
+    _ntdll.NtResumeProcess.argtypes = [wintypes.HANDLE]
+    _ntdll.NtResumeProcess.restype = ctypes.c_long  # NTSTATUS, 0 on success
+
+    def _win_new_job() -> int | None:
+        handle = _kernel32.CreateJobObjectW(None, None)
+        if not handle:
+            _job_unavailable("create", ctypes.get_last_error())
+            return None
+        info = _ExtendedLimit()
+        info.BasicLimitInformation.LimitFlags = _JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+        if not _kernel32.SetInformationJobObject(
+            handle, _JOB_OBJECT_EXTENDED_LIMIT_INFORMATION, ctypes.byref(info), ctypes.sizeof(info)
+        ):
+            _job_unavailable("configure", ctypes.get_last_error())
+            _kernel32.CloseHandle(handle)
+            return None
+        return int(handle)
+
+    def _win_adopt(job: int, pid: int) -> bool:
+        # PID reuse is impossible here: the Popen object still holds a handle to the child.
+        process = _kernel32.OpenProcess(_PROCESS_ACCESS, False, pid)
+        if not process:
+            error = ctypes.get_last_error()
+            raise ProcessError(f"cannot open the started process: WinError {error}")
+        try:
+            assigned = bool(_kernel32.AssignProcessToJobObject(job, process))
+            if not assigned:
+                _job_unavailable("assign", ctypes.get_last_error())
+            status = _ntdll.NtResumeProcess(process)
+            if status != 0:
+                _kernel32.TerminateProcess(process, 1)
+                raise ProcessError(f"cannot resume the started process: NTSTATUS {status:#x}")
+        finally:
+            _kernel32.CloseHandle(process)
+        return assigned
+
+    def _win_active_processes(job: int) -> int:
+        info = _BasicAccounting()
+        if not _kernel32.QueryInformationJobObject(
+            job,
+            _JOB_OBJECT_BASIC_ACCOUNTING_INFORMATION,
+            ctypes.byref(info),
+            ctypes.sizeof(info),
+            None,
+        ):
+            return 0
+        return int(info.ActiveProcesses)
+
+    def _win_terminate(job: int) -> None:
+        _kernel32.TerminateJobObject(job, 1)
+
+    def _win_close(handle: int) -> None:
+        _kernel32.CloseHandle(handle)
+
+else:  # POSIX never creates a job, so these are never called with a real handle.
+
+    def _win_new_job() -> int | None:
+        return None
+
+    def _win_adopt(job: int, pid: int) -> bool:
+        return False
+
+    def _win_active_processes(job: int) -> int:
+        return 0
+
+    def _win_terminate(job: int) -> None:
+        return None
+
+    def _win_close(handle: int) -> None:
+        return None
+
+
+def _job_unavailable(stage: str, error: int) -> None:
+    """Log ``process.job_object_unavailable`` once per Arpeggio process."""
+    global _job_unavailable_logged
+    if not _job_unavailable_logged:
+        _job_unavailable_logged = True
+        log.warning(
+            "process.job_object_unavailable",
+            extra={"stage": stage, "winerror": error, "fallback": "taskkill"},
+        )
+
+
+class WindowsJob:
+    """One check's Job Object (Windows only; never created on POSIX)."""
+
+    def __init__(self, handle: int) -> None:
+        self.handle: int | None = handle
+
+    def adopt(self, pid: int) -> bool:
+        """Put the suspended process ``pid`` in the job, then resume it.
+
+        Returns False if the job refused it (the process still runs, outside the job).
+        Raises ProcessError if the process cannot be resumed; it is terminated then.
+        """
+        assert self.handle is not None
+        return _win_adopt(self.handle, pid)
+
+    def active_processes(self) -> int:
+        return 0 if self.handle is None else _win_active_processes(self.handle)
+
+    def terminate(self) -> None:
+        if self.handle is not None:
+            _win_terminate(self.handle)
+
+    def close(self) -> None:
+        if self.handle is not None:
+            _win_close(self.handle)
+        self.handle = None
+
+
+def create_job() -> WindowsJob | None:
+    """A Job Object for the next check on Windows, None on POSIX or if Windows refuses one."""
+    handle = _win_new_job()
+    return None if handle is None else WindowsJob(handle)
+
+
+async def _enter_job(job: WindowsJob, process: asyncio.subprocess.Process) -> bool:
+    """Move a suspended child into ``job`` and resume it. False means: fall back to taskkill."""
+    try:
+        if job.adopt(process.pid):
+            return True
+    except ProcessError:
+        with contextlib.suppress(ProcessLookupError):
+            process.kill()
+        with contextlib.suppress(TimeoutError):
+            await asyncio.wait_for(process.wait(), REAP_WAIT_S)
+        raise
+    job.close()
+    return False
+
+
 def _read_tail(handle: IO[bytes], limit: int) -> bytes:
     """The file's content, or its last ``limit`` bytes after a truncation marker."""
     size = handle.seek(0, os.SEEK_END)
@@ -171,8 +394,11 @@ async def run_process(
     if not argv:
         raise ProcessError("argv must not be empty")
     executable = resolve_executable(argv[0], env, cwd)
+    job = create_job()
     if sys.platform == "win32":
-        flags = {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP}
+        # In a job the child starts suspended and runs only once it is inside the job.
+        suspended = CREATE_SUSPENDED if job is not None else 0
+        flags = {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP | suspended}
     else:
         flags = {"start_new_session": True}
     fd, name = tempfile.mkstemp(prefix="arpeggio-check-", suffix=".log", dir=OUTPUT_TMP_DIR)
@@ -192,16 +418,28 @@ async def run_process(
                 )
             except OSError as error:
                 raise ProcessError(f"cannot start {argv[0]}: {error.strerror or error}") from None
+            if job is not None and not await _enter_job(job, process):
+                job = None  # not in the job, but running: fall back to taskkill
             timed_out, limit_exceeded = await _wait(process, output.fileno(), started, timeout_s)
             if timed_out or limit_exceeded:
-                await _kill_tree(process.pid)
+                if job is not None:
+                    job.terminate()
+                else:
+                    await _kill_tree(process.pid)
                 with contextlib.suppress(TimeoutError):
                     await asyncio.wait_for(process.wait(), REAP_WAIT_S)
+            elif job is not None:
+                stragglers = job.active_processes()
+                if stragglers:
+                    job.terminate()
+                    log.warning("process.stragglers_killed", extra={"processes": stragglers})
             elif sys.platform != "win32":
                 await _kill_tree(process.pid)  # background children left in the group
             duration = time.monotonic() - started
             data = _read_tail(output, MAX_OUTPUT_BYTES)
     finally:
+        if job is not None:
+            job.close()  # kill-on-close also ends anything still in the job
         _delete(Path(name))
     killed = timed_out or limit_exceeded
     return ProcessResult(
