@@ -10,8 +10,8 @@ task, repeat by repeat, and the strategies interleaved within each, so a run sto
 cap still has paired results. Each task run is one ``tasks`` row (``source = 'eval'``) with
 the eval task's criteria; each route tried is one single-shot patch attempt (ADR-0008).
 After the patch is applied and before the checks, the task's ``setup`` commands run and its
-hidden tests are copied in. An attempt that fails its checks or whose patch fails
-(``patch_*``) escalates to the next route with a compact failure report
+hidden tests are copied in. An attempt that fails its checks, whose patch fails
+(``patch_*``) or whose reply was cut off before a usable diff (``output_truncated``) escalates to the next route with a compact failure report
 (``evals/feedback.py``). Provider errors, timeouts, setup failures and guard refusals do
 not escalate. Worktrees are removed after each attempt unless ``keep_worktrees``.
 """
@@ -308,9 +308,11 @@ def counterfactual_usd(config: Config, steps: list[Step]) -> float:
 
 
 def escalation_kind(outcome: PatchAttemptOutcome) -> str | None:
-    """``checks_failed`` or the ``patch_*`` reason when the next route should be tried."""
-    if outcome.failure_reason is not None and outcome.failure_reason.startswith("patch_"):
-        return outcome.failure_reason
+    """``checks_failed``, ``output_truncated`` or the ``patch_*`` reason when the next route
+    should be tried."""
+    reason = outcome.failure_reason
+    if reason is not None and (reason.startswith("patch_") or reason == "output_truncated"):
+        return reason
     if outcome.attempt_status == "completed" and outcome.task_status == "failed":
         return "checks_failed"
     return None

@@ -1,7 +1,8 @@
 """Compact failure report for an escalated attempt (VER-03), without leaking hidden tests.
 
-The next attempt's prompt gets: the attempt number, the failure kind (``checks_failed`` or
-a ``patch_*`` reason), each failing criterion's 1-based index and exit code, and the last
+The next attempt's prompt gets: the attempt number, the failure kind (``checks_failed``,
+``output_truncated`` or a ``patch_*`` reason), for ``output_truncated`` one line asking for
+short reasoning (``TRUNCATED_HINT``), each failing criterion's 1-based index and exit code, and the last
 ``FEEDBACK_TAIL_CHARS`` characters of its already redacted output, but only when that
 output cannot show a hidden test. Never the previous transcript, never hidden test files.
 
@@ -22,6 +23,10 @@ from collections.abc import Collection, Sequence
 from dataclasses import dataclass
 
 FEEDBACK_TAIL_CHARS = 1500
+TRUNCATED_HINT = (
+    "The reply was cut off at the output limit before a usable diff."
+    " Keep reasoning short and write the diff first."
+)
 _EXPLICIT = re.compile(r"[^-][^=]*[/\\].*|[^-][\w-]*\.[\w.-]+")
 
 
@@ -82,6 +87,8 @@ def failure_report(
     lines = [f"Attempt {attempt_number} failed: {kind}."]
     if kind == "checks_failed":
         lines.append("Failing checks (numbered as listed above):")
+    elif kind == "output_truncated":
+        lines.append(TRUNCATED_HINT)
     for check in failed:
         code = "none (did not finish)" if check.exit_code is None else str(check.exit_code)
         lines.append(f"- check {check.index}: exit code {code}")

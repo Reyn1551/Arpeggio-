@@ -162,11 +162,13 @@ A route is a model key and an effort. Every strategy only sees the models allowe
 
 At most three attempts per task run. Two consecutive identical routes are merged. Risk is the task's `expected_risk` in M0.6. The signal-based risk classifier arrives in v1, so `arpeggio` here measures the rule table, not risk detection.
 
-Escalation happens only after a verification failure (`checks_failed`) or a patch failure (a `patch_*` reason). A provider error that survives the adapter's own retries ends the task run as `error`. A spend-guard refusal ends it as `paused`. A failing `setup` command ends it as `error` with `setup_failed`, because the task, not the model, is broken. None of these escalate.
+Escalation happens only after a verification failure (`checks_failed`), a patch failure (a `patch_*` reason) or `output_truncated`: the reply stopped at the output limit (`finish_reason` `length`) and its patch was missing or did not apply. A gateway that forces thinking on can spend the whole `max_tokens` on reasoning and return empty content, so this is a model failure like a bad patch, not a provider error. A provider error that survives the adapter's own retries ends the task run as `error`. A spend-guard refusal ends it as `paused`. A failing `setup` command ends it as `error` with `setup_failed`, because the task, not the model, is broken. None of these escalate.
 
 ### The failure report
 
 An escalated attempt's prompt ends with a short report: the attempt number, the failure kind, each failing check's number and exit code, and the last 1,500 characters of its already redacted output. The report never includes the previous transcript or a hidden test. Output is withheld whenever it could show a hidden test: when the check's arguments name a hidden test path, one of its directories (`tests`, `.`) or its module form (`tests.test_mul`), when they name no path at all (a bare `pytest` or `npm test` may discover hidden tests on its own), or when the output mentions a hidden test file name. The check's number and exit code are still reported.
+
+For `output_truncated` the report adds one fixed line: the reply was cut off at the output limit, keep reasoning short and write the diff first. So escalated prompts of `senior` and `arpeggio` are not identical to first-attempt prompts, beyond the failure report itself: an attempt after a truncation carries this extra instruction, and only those attempts do. Compare first attempts with first attempts when a prompt difference matters.
 
 ### Budget, estimate and cap
 
