@@ -2,6 +2,8 @@
 
 A worktree lives at ``<home>/worktrees/<attempt_id>`` (short, for Windows ``MAX_PATH``) on
 branch ``arpeggio/<task_id>/<attempt_seq>``, created at the source repo's ``HEAD`` commit.
+Eval self-checks pass an explicit ``base`` commit (a full or abbreviated SHA that must
+resolve to a commit) and their own branch name, ``arpeggio/eval/<task_id>/<run>``.
 Uncommitted changes in the user's working copy are not carried over: the worktree starts
 from the last commit, and a dirty source logs ``worktree.base_dirty``. The user's working
 copy and branches are never modified.
@@ -28,6 +30,7 @@ log = logging.getLogger(__name__)
 GIT_MIN = (2, 30)
 GIT_TIMEOUT_S = 120.0
 BRANCH_PREFIX = "arpeggio/"
+_SHA = re.compile(r"[0-9a-fA-F]{4,40}")
 _VERSION = re.compile(r"git version (\d+)\.(\d+)(?:\.(\d+))?")
 _checked_git: tuple[int, int, int] | None = None
 
@@ -115,17 +118,26 @@ async def create_worktree(
     attempt_id: str,
     attempt_seq: int,
     env: Mapping[str, str],
+    base: str | None = None,
+    branch: str | None = None,
 ) -> Worktree:
-    """Create the attempt's worktree on a new branch at the source repo's HEAD commit."""
+    """Create the attempt's worktree on a new branch at ``base``, or at HEAD when it is None.
+
+    ``branch`` overrides the default ``arpeggio/<task_id>/<attempt_seq>`` name and must
+    start with ``arpeggio/``.
+    """
     repo = repo.resolve()
     await require_git(env, home, repo)
     top = await git(["rev-parse", "--show-toplevel"], cwd=repo, env=env, home=home)
     if top.exit_code != 0 or Path(top.text().strip()).resolve() != repo:
         raise WorktreeError(f"not the root of a git repository: {repo}")
-    head = await git(["rev-parse", "--verify", "HEAD^{commit}"], cwd=repo, env=env, home=home)
-    if head.exit_code != 0:
-        raise WorktreeError(f"repository has no commits yet: {repo}")
-    base_sha = head.text().strip()
+    if base is None:
+        head = await git(["rev-parse", "--verify", "HEAD^{commit}"], cwd=repo, env=env, home=home)
+        if head.exit_code != 0:
+            raise WorktreeError(f"repository has no commits yet: {repo}")
+        base_sha = head.text().strip()
+    else:
+        base_sha = await resolve_commit(repo, base, home=home, env=env)
 
     status = _ok(await git(["status", "--porcelain"], cwd=repo, env=env, home=home), "git status")
     dirty = bool(status)
@@ -137,7 +149,10 @@ async def create_worktree(
     path = root / attempt_id
     if path.exists():
         raise WorktreeError(f"worktree path already exists: {path}")
-    branch = f"{BRANCH_PREFIX}{task_id}/{attempt_seq}"
+    if branch is None:
+        branch = f"{BRANCH_PREFIX}{task_id}/{attempt_seq}"
+    elif not branch.startswith(BRANCH_PREFIX):
+        raise WorktreeError(f"worktree branch must start with {BRANCH_PREFIX}: {branch}")
     _ok(
         await git(
             ["worktree", "add", "-b", branch, str(path), base_sha], cwd=repo, env=env, home=home
@@ -146,6 +161,21 @@ async def create_worktree(
     )
     log.info("worktree.created", extra={"path": str(path), "branch": branch})
     return Worktree(path=path, branch=branch, base_sha=base_sha, dirty_source=dirty)
+
+
+async def resolve_commit(repo: Path, ref: str, *, home: Path, env: Mapping[str, str]) -> str:
+    """The full SHA of commit ``ref`` (a full or abbreviated hex SHA) in ``repo``."""
+    if _SHA.fullmatch(ref) is None:
+        raise WorktreeError(f"not a commit SHA (4 to 40 hex characters): {ref!r}")
+    result = await git(
+        ["rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}"],
+        cwd=repo.resolve(),
+        env=env,
+        home=home,
+    )
+    if result.exit_code != 0:
+        raise WorktreeError(f"commit {ref} not found (or ambiguous) in {repo}")
+    return result.text().strip()
 
 
 def _inside_root(path: Path, home: Path) -> Path:
