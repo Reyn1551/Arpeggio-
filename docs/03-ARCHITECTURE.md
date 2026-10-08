@@ -166,13 +166,19 @@ Notes:
 2. The attempt gets its own git worktree at `~/.arpeggio/worktrees/<attempt_id>` on branch `arpeggio/<task_id>/<seq>`, created at the source repo's `HEAD` commit (EXE-04). Uncommitted changes in your working copy are not carried over, and a dirty source logs `worktree.base_dirty`. Your working copy and branches are never modified, and the worktree is kept for inspection after the attempt.
 3. In single-shot patch mode ([ADR-0008](adr/0008-single-shot-patch-executor.md), EXE-08), the `api` adapter is asked for exactly one unified diff. The prompt holds the packaged system instruction, the task, each check in plain text, and the requested context files (at most 100 KB, secret file patterns skipped). The task and each context file pass the secret scanner first, and a `prompt` step records how many items were redacted ([Secrets](07-SECURITY-AND-PRIVACY.md#secrets)).
 4. The diff is validated, its line endings are matched to each file (CRLF, LF, or left alone for a mixed file), and it is applied with `git apply` and committed on the attempt branch as `Arpeggio <arpeggio@localhost>`. The model's diff is stored as `patch-raw.diff` and the applied one as `patch.diff`, behind a `patch` step. A missing, ambiguous, unsafe or non-applying diff ends the attempt with status `error` and `failure_reason`, and the task fails.
-5. Every criterion runs in the worktree, in stored order, even after a failure. All pass: the task moves to `awaiting_review`. Any failure: the task is `failed`, since escalation (VER-03) is not built yet.
+5. Every criterion runs in the worktree, in stored order, even after a failure. All pass: the task moves to `awaiting_review`. Any failure: the task is `failed`. Escalation to another route (VER-03) is up to the caller: in M0.6 the eval runner starts a new attempt with a failure report (see below).
 
 Checks and git commands run through `safety/process.py`. The environment starts from an allowlist plus `[repo] check_env`, and provider key variables are always removed (SAF-02). Each check has a timeout, and on expiry the whole process tree is killed: the process group on POSIX, the check's Job Object on Windows, with `taskkill /T /F` as the fallback when Windows refuses a job (EXE-06). Every git command runs with hooks disabled, `core.autocrlf=false` and commit signing off.
 
 ## Eval suite tooling (M0.5)
 
 `evals/` reads task files from the personal suite ([06](06-EVALUATION.md#where-the-suite-lives)) and makes no model call. `eval check` creates two worktrees per task with `safety/worktree.py` at explicit commits (`base`, then `solution` or `base` plus `reference_diff` applied by `orchestrator/patch.py`), runs `setup` and the criteria through `safety/process.py` and `verify/runner.run_specs`, which runs criteria without a database, and copies hidden tests in between. Nothing is written to the store. Logs go to the artifact store and a JSON report to the suite's `.reports/`. `run_patch_attempt` accepts an `eval_task` whose hidden test paths it refuses as prompt context, ready for the strategy runs of M0.6.
+
+## Baseline runs (M0.6)
+
+`eval run` plans before it spends ([ADR-0010](adr/0010-baseline-runner-and-policy-file.md)). `evals/runner.build_plan` selects tasks whose self-check is current and `valid`, loads each task's merged config (global, or `--config`, plus the repo's), and asks `evals/strategies.py` for every strategy's route sequence. Those come from `routing/resolve.py`, which keeps only models allowed by the profile, SAF-07 and the placeholder guard, and for `arpeggio` from the rule file in `routing/policy.py`. `evals/budget.py` prices each planned attempt at the spend guard's worst case. The CLI refuses to start above the limit or at peak prices, and `--dry-run` stops here.
+
+`EvalRunner` then creates one `eval_runs` row per strategy and, per task run, a `tasks` row with the task's criteria. Each route is one `run_patch_attempt` at the task's `base` commit. Its `prepare` hook runs the `setup` commands and copies the hidden tests in after the patch is applied and before the checks. A `checks_failed` or `patch_*` failure leads to the next route with a failure report from `evals/feedback.py`. A `SpendCap` checks every attempt's worst case against the limit first. Results, counterfactual cost and tags go to `eval_results`, and `evals/report.py` turns them into per-profile sections with bootstrap intervals.
 
 ## Gateways and local providers
 
@@ -209,8 +215,6 @@ arpeggio/
 ├── docs/
 │   ├── 01-VISION-AND-GOALS.md … 08-ROADMAP.md
 │   └── adr/
-├── config/
-│   └── policy.example.yaml        # routing policy (rules), planned
 ├── src/arpeggio_ai/
 │   ├── paths.py                   # ARPEGGIO_HOME and config file locations
 │   ├── config/                    # models.py (Pydantic schema), loader.py (read, merge, validate)
@@ -223,7 +227,8 @@ arpeggio/
 │   ├── core/                      # errors.py, ids.py (ULID), clock.py (UTC timestamps), logs.py (JSON lines),
 │   │                              #   later task, attempt, lifecycle state machine, orchestrator
 │   ├── intake/                    # criteria derivation, clarification, splitting
-│   ├── routing/                   # risk.py, policy.py, bandit.py (v2), fallback.py
+│   ├── routing/                   # resolve.py (allowed models, tiers, efforts), policy.py and
+│   │                              #   policy.default.yaml (rules); later risk.py, bandit.py (v2)
 │   ├── cost/                      # pricing.py, guard.py; later governor.py, budget.py, loops.py, context_diet.py
 │   ├── adapters/                  # base.py, registry.py, api.py; later claude_code.py, opencode.py, command_code.py
 │   ├── orchestrator/              # attempts.py (run an attempt, record steps), patch.py (patch mode), prompts/
@@ -231,10 +236,11 @@ arpeggio/
 │   ├── safety/                    # process.py (checks: env, timeout, tree kill), worktree.py, secret_scan.py,
 │   │                              #   fileset.py (globs, secrets scan walk); later approvals.py, sandbox.py
 │   ├── store/                     # db.py (connection, migrations), repositories.py, artifacts.py,
-│   │                              #   migrations/0001_initial.sql
+│   │                              #   migrations/0001_initial.sql … 0006_eval_runs.sql
 │   ├── learning/                  # reflector.py, taste.py, skills.py, export.py (v2)
 │   ├── evals/                     # task.py (format, loader), suite.py (splits, reports), hidden.py,
-│   │                              #   scaffold.py (eval new), selfcheck.py (eval check); later runner, strategies
+│   │                              #   scaffold.py (eval new), textcheck.py, selfcheck.py (eval check),
+│   │                              #   strategies.py, budget.py, feedback.py, runner.py (eval run), report.py
 │   ├── mcp/                       # MCP server (v2)
 │   └── dashboard/                 # FastAPI app, templates
 ├── evals/
