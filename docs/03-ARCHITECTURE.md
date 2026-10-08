@@ -170,6 +170,10 @@ Notes:
 
 Checks and git commands run through `safety/process.py`. The environment starts from an allowlist plus `[repo] check_env`, and provider key variables are always removed (SAF-02). Each check has a timeout, and on expiry the whole process tree is killed: the process group on POSIX, the check's Job Object on Windows, with `taskkill /T /F` as the fallback when Windows refuses a job (EXE-06). Every git command runs with hooks disabled, `core.autocrlf=false` and commit signing off.
 
+## Eval suite tooling (M0.5)
+
+`evals/` reads task files from the personal suite ([06](06-EVALUATION.md#where-the-suite-lives)) and makes no model call. `eval check` creates two worktrees per task with `safety/worktree.py` at explicit commits (`base`, then `solution` or `base` plus `reference_diff` applied by `orchestrator/patch.py`), runs `setup` and the criteria through `safety/process.py` and `verify/runner.run_specs`, which runs criteria without a database, and copies hidden tests in between. Nothing is written to the store. Logs go to the artifact store and a JSON report to the suite's `.reports/`. `run_patch_attempt` accepts an `eval_task` whose hidden test paths it refuses as prompt context, ready for the strategy runs of M0.6.
+
 ## Gateways and local providers
 
 Gateways (OpenRouter, 9Router, LiteLLM) and local servers (Ollama) are configured as `openai_compatible` providers. Local ones may use plain `http` on a loopback address and need no API key. Arpeggio never relies on gateway-side fallback for learning data: each step records the model that actually answered, and a mismatch keeps the attempt out of router learning (RTE-11). Configure gateways with fallback disabled or a fixed model. See [ADR-0006](adr/0006-gateways-and-free-tier-ethics.md) and [Gateways and free tiers](05-ROUTING-AND-COST.md#gateways-and-free-tiers).
@@ -224,16 +228,18 @@ arpeggio/
 │   ├── adapters/                  # base.py, registry.py, api.py; later claude_code.py, opencode.py, command_code.py
 │   ├── orchestrator/              # attempts.py (run an attempt, record steps), patch.py (patch mode), prompts/
 │   ├── verify/                    # criteria.py, runner.py; later reviewer.py, depth.py
-│   ├── safety/                    # process.py (checks: env, timeout, tree kill), worktree.py; later approvals.py, sandbox.py
+│   ├── safety/                    # process.py (checks: env, timeout, tree kill), worktree.py, secret_scan.py,
+│   │                              #   fileset.py (globs, secrets scan walk); later approvals.py, sandbox.py
 │   ├── store/                     # db.py (connection, migrations), repositories.py, artifacts.py,
 │   │                              #   migrations/0001_initial.sql
 │   ├── learning/                  # reflector.py, taste.py, skills.py, export.py (v2)
-│   ├── evals/                     # loader, runner, strategies, report
+│   ├── evals/                     # task.py (format, loader), suite.py (splits, reports), hidden.py,
+│   │                              #   scaffold.py (eval new), selfcheck.py (eval check); later runner, strategies
 │   ├── mcp/                       # MCP server (v2)
 │   └── dashboard/                 # FastAPI app, templates
 ├── evals/
-│   ├── tasks/                     # tuning set
-│   └── holdout/                   # never used for tuning
+│   └── sample/                    # public sample suite (tasks/, holdout/, fixtures/); the personal
+│                                  #   suite lives outside the repo, see 06-EVALUATION
 └── tests/
     ├── unit/
     ├── contract/                  # adapter contract tests
@@ -253,6 +259,7 @@ The profile templates (`free.toml`, `micro-deepseek.toml`, `standard.toml`, `pro
 | `~/.arpeggio/taste/` | Vendor-neutral taste rules (git repo) |
 | `~/.arpeggio/skills/` | Reusable skills (git repo) |
 | `~/.arpeggio/logs/YYYY-MM-DD.jsonl` | Structured logs, one JSON object per line and one file per UTC day (OBS-03) |
+| `~/.arpeggio/evals/` | Personal eval suite (default location, own private git repo recommended). `ARPEGGIO_EVALS_DIR` or `[evals] dir` moves it |
 | `~/.arpeggio/backups/` | Database copies taken before each schema migration, five newest kept |
 | `<repo>/.arpeggio/config.toml` | Per-repo overrides, deep-merged over the global config. The only file allowed a `[repo]` table (privacy class, provider allowlist). Checks are planned. |
 

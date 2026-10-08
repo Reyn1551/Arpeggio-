@@ -292,7 +292,11 @@ def test_repo_opt_in_overrides_global(
 
 
 def test_evals_table_is_global_only(
-    write_global: WriteFile, write_repo: WriteFile, template_text: str, repo_dir: Path, tmp_path: Path
+    write_global: WriteFile,
+    write_repo: WriteFile,
+    template_text: str,
+    repo_dir: Path,
+    tmp_path: Path,
 ) -> None:
     target = (tmp_path / "my-evals").as_posix()
     write_global(template_text + f'\n[evals]\ndir = "{target}"\n')

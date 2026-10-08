@@ -134,8 +134,8 @@
 
 | ID | P | Requirement | Acceptance criterion |
 |---|---|---|---|
-| EVL-01 | P0 | The repo MUST contain an eval suite of ≥ 20 real tasks with done criteria (see [06](06-EVALUATION.md)). | `evals/tasks/` has ≥ 20 valid task files. |
-| EVL-02 | P0 | ≥ 30% of eval tasks MUST be held out and never used for tuning. | Holdout tasks are tagged and excluded from tuning commands. |
+| EVL-01 | P0 | The owner's personal eval suite MUST hold ≥ 20 real tasks with done criteria, each passing the self-check (checks fail at base, pass with the reference solution). It lives outside the Arpeggio repo, which ships only a public sample suite (see [06](06-EVALUATION.md#where-the-suite-lives)). | `arpeggio eval check` reports ≥ 20 `valid` tasks. |
+| EVL-02 | P0 | ≥ 30% of eval tasks MUST be held out and never used for tuning. | Holdout tasks live in `holdout/` and are excluded from tuning commands. `arpeggio eval list` warns when the share is below 30%. |
 | EVL-03 | P0 | The system MUST run the 4-strategy baseline experiment (Junior, Middle, Senior, Arpeggio). | `arpeggio eval run --strategy all` produces a comparison report. |
 | EVL-04 | P0 | An **eval gate** MUST run before any policy, taste, skill, or prompt change is accepted, and reject changes that lower holdout score beyond tolerance. | A regressing change is rejected in CI. |
 | EVL-05 | P1 | Eval reports SHOULD include confidence intervals; a change is "better" only if the improvement is outside noise. | Reports show CI per metric. |

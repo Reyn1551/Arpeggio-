@@ -7,9 +7,9 @@ at fault. The field reference lives in docs/05-ROUTING-AND-COST.md.
 """
 
 import re
-from pathlib import Path
 from collections.abc import Mapping
 from datetime import date, datetime
+from pathlib import Path
 from typing import Annotated, Any, Literal, Self
 from urllib.parse import urlsplit
 
