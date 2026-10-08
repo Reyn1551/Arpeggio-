@@ -13,6 +13,7 @@ from typing import Annotated, Any, Literal, Self
 from urllib.parse import urlsplit
 
 from pydantic import (
+    AfterValidator,
     BaseModel,
     ConfigDict,
     Field,
@@ -36,6 +37,19 @@ DataUse = Literal["no_training", "may_train", "unknown"]
 ProviderName = Annotated[str, StringConstraints(pattern=r"^[a-z][a-z0-9_-]*$")]
 ModelKey = Annotated[str, StringConstraints(pattern=r"^tier[1-3]\.[a-z0-9_-]+$")]
 EnvVarName = Annotated[str, StringConstraints(pattern=r"^[A-Za-z_][A-Za-z0-9_]*$")]
+
+
+def _valid_regex(value: str) -> str:
+    try:
+        re.compile(value)
+    except re.error as error:
+        raise PydanticCustomError(
+            "invalid_regex", "not a valid regular expression: {error}", {"error": str(error)}
+        ) from None
+    return value
+
+
+AllowRegex = Annotated[str, AfterValidator(_valid_regex)]
 
 API_KEY_REF = re.compile(r"(env|keychain):[A-Za-z_][A-Za-z0-9_.-]*")
 INLINE_KEY_MESSAGE = "inline API keys are not allowed; use env:VAR or keychain:NAME"
@@ -373,6 +387,9 @@ class RepoSettings(_Model):
     allow_training_providers: bool | None = None
     # Extra environment variables checks may see (SAF-02). Provider key variables never pass.
     check_env: list[EnvVarName] = Field(default_factory=list)
+    # Regexes for secret-scanner findings that are not secrets (SAF-02). A finding is kept
+    # when its matched text fully matches one. Configured keys and private keys never are.
+    secret_scan_allow: list[AllowRegex] = Field(default_factory=list, max_length=20)
 
     @field_validator("check_env")
     @classmethod

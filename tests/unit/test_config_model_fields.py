@@ -375,3 +375,27 @@ def test_bad_check_env_is_rejected(
 ) -> None:
     config_data["repo"] = {"check_env": names}
     assert set(fields(config_data)) == {field}
+
+
+def test_secret_scan_allow_defaults_to_empty(config_data: dict[str, Any]) -> None:
+    assert parse_config(config_data).repo.secret_scan_allow == []
+
+
+def test_secret_scan_allow_round_trip(config_data: dict[str, Any]) -> None:
+    config_data["repo"] = {"secret_scan_allow": [r"sk-test-[a-z0-9]+", "AKIAEXAMPLE.*"]}
+    assert parse_config(config_data).repo.secret_scan_allow == [
+        r"sk-test-[a-z0-9]+",
+        "AKIAEXAMPLE.*",
+    ]
+
+
+def test_invalid_secret_scan_allow_regex_is_a_config_error(config_data: dict[str, Any]) -> None:
+    config_data["repo"] = {"secret_scan_allow": ["ok", "(unclosed"]}
+    problems = fields(config_data)
+    assert set(problems) == {"repo.secret_scan_allow.1"}
+    assert "not a valid regular expression" in problems["repo.secret_scan_allow.1"]
+
+
+def test_secret_scan_allow_takes_at_most_20_entries(config_data: dict[str, Any]) -> None:
+    config_data["repo"] = {"secret_scan_allow": [f"x{n}" for n in range(21)]}
+    assert set(fields(config_data)) == {"repo.secret_scan_allow"}

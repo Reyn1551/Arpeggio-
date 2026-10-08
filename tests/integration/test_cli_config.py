@@ -223,7 +223,11 @@ def test_show_json_is_the_effective_config(
         "data_use": "unknown",
         "prompt_overhead_tokens": 0,
     }
-    assert config["repo"] == {"privacy_class": "client", "check_env": []}
+    assert config["repo"] == {
+        "privacy_class": "client",
+        "check_env": [],
+        "secret_scan_allow": [],
+    }
     assert config["privacy"] == {"allow_training_providers": False}
     assert parse_config(config).budget.per_task_usd == 1.5
 
