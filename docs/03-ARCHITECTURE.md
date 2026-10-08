@@ -158,6 +158,18 @@ Notes:
 - Adapters that wrap CLIs parse the CLI's structured/streaming output. Exact flags must be verified against each tool's current documentation at implementation time.
 - Approval-gated actions surface as `approval_request` events; the orchestrator pauses the stream until a decision arrives.
 
+## Worktrees, checks and patch mode (M0.4)
+
+`orchestrator/attempts.py` (`run_patch_attempt`) runs one attempt end to end:
+
+1. A task without done criteria goes to `needs_user`, and no attempt starts (VER-01).
+2. The attempt gets its own git worktree at `~/.arpeggio/worktrees/<attempt_id>` on branch `arpeggio/<task_id>/<seq>`, created at the source repo's `HEAD` commit (EXE-04). Uncommitted changes in your working copy are not carried over, and a dirty source logs `worktree.base_dirty`. Your working copy and branches are never modified, and the worktree is kept for inspection after the attempt.
+3. In single-shot patch mode ([ADR-0008](adr/0008-single-shot-patch-executor.md), EXE-08), the `api` adapter is asked for exactly one unified diff. The prompt holds the packaged system instruction, the task, each check in plain text, and the requested context files (at most 100 KB, secret file patterns skipped).
+4. The diff is validated, applied with `git apply` and committed on the attempt branch as `Arpeggio <arpeggio@localhost>`. A missing, ambiguous, unsafe or non-applying diff ends the attempt with status `error` and `failure_reason`, and the task fails.
+5. Every criterion runs in the worktree, in stored order, even after a failure. All pass: the task moves to `awaiting_review`. Any failure: the task is `failed`, since escalation (VER-03) is not built yet.
+
+Checks and git commands run through `safety/process.py`. The environment starts from an allowlist plus `[repo] check_env`, and provider key variables are always removed (SAF-02). Each check has a timeout, and on expiry the whole process tree is killed: the process group on POSIX, `taskkill /T /F` on Windows (EXE-06). Every git command runs with hooks disabled, `core.autocrlf=false` and commit signing off.
+
 ## Gateways and local providers
 
 Gateways (OpenRouter, 9Router, LiteLLM) and local servers (Ollama) are configured as `openai_compatible` providers. Local ones may use plain `http` on a loopback address and need no API key. Arpeggio never relies on gateway-side fallback for learning data: each step records the model that actually answered, and a mismatch keeps the attempt out of router learning (RTE-11). Configure gateways with fallback disabled or a fixed model. See [ADR-0006](adr/0006-gateways-and-free-tier-ethics.md) and [Gateways and free tiers](05-ROUTING-AND-COST.md#gateways-and-free-tiers).
@@ -210,9 +222,9 @@ arpeggio/
 │   ├── routing/                   # risk.py, policy.py, bandit.py (v2), fallback.py
 │   ├── cost/                      # pricing.py, guard.py; later governor.py, budget.py, loops.py, context_diet.py
 │   ├── adapters/                  # base.py, registry.py, api.py; later claude_code.py, opencode.py, command_code.py
-│   ├── orchestrator/              # attempts.py (run one attempt, record steps and artifacts)
-│   ├── verify/                    # runner.py, reviewer.py, depth.py
-│   ├── safety/                    # approvals.py, secrets.py, worktree.py, sandbox.py
+│   ├── orchestrator/              # attempts.py (run an attempt, record steps), patch.py (patch mode), prompts/
+│   ├── verify/                    # criteria.py, runner.py; later reviewer.py, depth.py
+│   ├── safety/                    # process.py (checks: env, timeout, tree kill), worktree.py; later approvals.py, sandbox.py
 │   ├── store/                     # db.py (connection, migrations), repositories.py, artifacts.py,
 │   │                              #   migrations/0001_initial.sql
 │   ├── learning/                  # reflector.py, taste.py, skills.py, export.py (v2)

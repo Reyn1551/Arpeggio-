@@ -1,4 +1,5 @@
 import sqlite3
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -9,19 +10,28 @@ from arpeggio_ai.store.repositories import (
     Repo,
     Step,
     Task,
+    add_criterion,
+    add_verdict,
     append_step,
     create_attempt,
     create_task,
     ensure_repo,
     get_attempt,
+    get_repo,
     get_task,
+    list_criteria,
     list_steps,
+    list_verdicts,
     max_prompt_overhead,
+    register_repo,
     set_attempt_status,
+    set_attempt_worktree,
     set_deferred_until,
+    set_failure_reason,
     set_model_mismatch,
     set_task_status,
 )
+from arpeggio_ai.verify.criteria import CriterionError
 
 ROUTE: dict[str, Any] = {
     "adapter": "api",
@@ -457,3 +467,89 @@ def test_max_prompt_overhead_reads_only_the_last_20_steps(
         overhead_step(db, attempt, value)
     assert max_prompt_overhead(db, "jembatanai", ROUTE["model"]) == 19
     assert max_prompt_overhead(db, "jembatanai", ROUTE["model"], last=21) == 99_999
+
+
+# Repos registered by path
+
+
+def test_register_repo_is_idempotent_and_resolves(db: sqlite3.Connection, tmp_path: Path) -> None:
+    first = register_repo(db, tmp_path / "app" / ".." / "app")
+    second = register_repo(db, tmp_path / "app")
+    assert first.id == second.id
+    assert first.path == str((tmp_path / "app").resolve()) and first.name == "app"
+    assert get_repo(db, first.id) == second
+    assert get_repo(db, "nope") is None
+
+
+def test_register_repo_requires_an_absolute_path(db: sqlite3.Connection) -> None:
+    with pytest.raises(StoreError, match="must be absolute"):
+        register_repo(db, Path("relative/app"))
+
+
+# Attempt worktree fields
+
+
+def test_set_attempt_worktree_and_failure_reason(db: sqlite3.Connection, attempt: Attempt) -> None:
+    updated = set_attempt_worktree(db, attempt.id, "/w/a1", "arpeggio/t/1", "abc123")
+    assert (updated.worktree, updated.branch, updated.base_sha) == (
+        "/w/a1",
+        "arpeggio/t/1",
+        "abc123",
+    )
+    assert set_failure_reason(db, attempt.id, "patch_unsafe").failure_reason == "patch_unsafe"
+    with pytest.raises(StoreError, match="unknown attempt"):
+        set_attempt_worktree(db, "nope", "/w", "b", "s")
+    with pytest.raises(StoreError, match="must not be empty"):
+        set_failure_reason(db, attempt.id, "")
+
+
+# Done criteria and verdicts
+
+
+COMMAND = {"kind": "command", "argv": ["pytest", "tests/test_x.py"]}
+
+
+def test_criteria_are_validated_and_listed_in_order(db: sqlite3.Connection, task: Task) -> None:
+    first = add_criterion(db, task.id, COMMAND)
+    second = add_criterion(db, task.id, {"kind": "file_exists", "path": "src/a.py"}, "derived")
+    assert first.spec == {**COMMAND, "expect_exit": 0, "timeout_s": 300}
+    assert (second.kind, second.origin) == ("file_exists", "derived")
+    assert [c.id for c in list_criteria(db, task.id)] == [first.id, second.id]
+    assert first.parsed().argv == ["pytest", "tests/test_x.py"]
+
+
+def test_invalid_criteria_are_rejected(db: sqlite3.Connection, task: Task) -> None:
+    with pytest.raises(CriterionError, match="shell strings are not supported"):
+        add_criterion(db, task.id, {"kind": "command", "argv": "pytest -q"})
+    with pytest.raises(StoreError, match="invalid criterion origin"):
+        add_criterion(db, task.id, COMMAND, "magic")  # type: ignore[arg-type]
+    with pytest.raises(StoreError, match="unknown task"):
+        add_criterion(db, "nope", COMMAND)
+
+
+def test_verdicts_round_trip(db: sqlite3.Connection, task: Task, attempt: Attempt) -> None:
+    criterion = add_criterion(db, task.id, COMMAND)
+    verdict = add_verdict(
+        db,
+        attempt.id,
+        kind="check",
+        passed=False,
+        criterion_id=criterion.id,
+        detail={"exit_code": 1, "timed_out": False},
+        log_ref="t/a/check-1.log",
+    )
+    assert (verdict.passed, verdict.cost_usd, verdict.detail) == (
+        False,
+        0.0,
+        {"exit_code": 1, "timed_out": False},
+    )
+    assert list_verdicts(db, attempt.id) == [verdict]
+
+
+def test_invalid_verdicts_are_rejected(db: sqlite3.Connection, attempt: Attempt) -> None:
+    with pytest.raises(StoreError, match="invalid verdict kind"):
+        add_verdict(db, attempt.id, kind="vibes", passed=True)  # type: ignore[arg-type]
+    with pytest.raises(StoreError, match="cost_usd must be >= 0"):
+        add_verdict(db, attempt.id, kind="check", passed=True, cost_usd=-1.0)
+    with pytest.raises(StoreError, match="cannot add verdict"):
+        add_verdict(db, "nope", kind="check", passed=True)

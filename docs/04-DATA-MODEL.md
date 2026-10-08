@@ -72,7 +72,7 @@ CREATE TABLE done_criteria (
     id          TEXT PRIMARY KEY,
     task_id     TEXT NOT NULL REFERENCES tasks(id),
     kind        TEXT NOT NULL CHECK (kind IN ('command','file_exists','metric','review')),
-    spec        TEXT NOT NULL,                  -- JSON, e.g. {"cmd":"pytest tests/x.py","expect_exit":0}
+    spec        TEXT NOT NULL,                  -- JSON, e.g. {"kind":"command","argv":["pytest","tests/x.py"],"expect_exit":0}
     origin      TEXT NOT NULL CHECK (origin IN ('user','derived'))
 );
 
@@ -102,6 +102,8 @@ CREATE TABLE attempts (
     checkpoint      TEXT,                       -- JSON for resume
     model_mismatch  INTEGER NOT NULL DEFAULT 0, -- served model differed from requested (RTE-11)
     deferred_until  TEXT,                       -- start no earlier than this (CST-10)
+    base_sha        TEXT,                       -- commit the worktree branch started from
+    failure_reason  TEXT,                       -- e.g. patch_unsafe; detail is in a step artifact
     UNIQUE (task_id, seq)
 );
 CREATE INDEX idx_attempts_route ON attempts(adapter, model, effort);
@@ -234,7 +236,10 @@ CREATE TABLE schema_version (
 - Before migrating a database that already has a schema, `open_db` copies it to `~/.arpeggio/backups/arpeggio.db.pre-v<target>.<YYYYMMDDTHHMMSSZ>` with SQLite's online backup API, which is safe while WAL is in use. If the backup fails, nothing is migrated. Only the five newest backups are kept, and only files with exactly that name pattern are ever deleted. A brand-new database is not backed up.
 - Status and enum-like columns have no SQL `CHECK`, including the ones added in `0002` (`tasks.profile`, `steps.price_window`, `quota_usage.window`, `quota_usage.source`). The repository layer (`store/repositories.py`) checks them against Python `Literal` types, because changing a `CHECK` in SQLite means rebuilding the table. Repositories write only the four real profiles (`free`, `micro`, `standard`, `pro`) and read `unknown` as well.
 - The token and cost totals on `attempts` are the one exception to the rule below. Each step updates them in the same transaction that inserts the step, because live cost is needed while the attempt runs (CLI-02, CST-03). A test keeps them equal to `SUM` over `steps`.
-- Repositories exist for `repos`, `tasks`, `attempts` and `steps`. The other tables, `quota_usage` included (first used in M1.11), get theirs in the milestone that first writes them.
+- `done_criteria.spec` is validated by `verify/criteria.py`. M0.4 supports two kinds: `{"kind": "command", "argv": [...], "expect_exit": 0, "timeout_s": 300}` (argv is a list, never a shell string; `timeout_s` 1 to 3600) and `{"kind": "file_exists", "path": "relative/posix/path"}`. Criteria run in insertion order, which is `rowid` order, since the table has no `seq` column.
+- A check verdict has `kind = 'check'`, its `criterion_id`, `cost_usd = 0`, a `log_ref` to the artifact `check-<n>.log` (stdout and stderr combined, at most the last 10 MB behind a truncation marker), and `detail` with `exit_code`, `expect_exit`, `duration_s`, `timed_out`, `output_limit_exceeded` and the last 2,000 characters of output. While a check runs its output goes to a temporary file whose size is checked every 0.5 s. Past 100 MB the process tree is killed as on timeout, the verdict fails with `output_limit_exceeded = true`, and the temporary file is deleted in every case. The 10 MB and 100 MB limits are module constants in `safety/process.py` for now and become config later.
+- `attempts.failure_reason` holds one of `patch_missing`, `patch_ambiguous`, `patch_unsafe` or `patch_does_not_apply` when patch mode fails before verification ([ADR-0008](adr/0008-single-shot-patch-executor.md)), or `worktree_failed` when the worktree could not be created. A `message` step with an artifact holds the detail, such as the offending path or git's error output.
+- Repositories exist for `repos`, `tasks`, `attempts`, `steps`, `done_criteria` and `verdicts`. The other tables, `quota_usage` included (first used in M1.11), get theirs in the milestone that first writes them.
 - `cached_tokens` counts cache-hit input tokens, which are priced at `price_cache_hit_per_m`.
 - `steps.prompt_overhead_tokens` is how many input tokens a provider billed beyond our own estimate of the prompt we sent: `input_tokens - ceil(characters / 4)`, floored at 0. It is set only on model calls whose usage the provider reported, so estimated steps leave it `NULL`. The spend guard reads the highest value among the last 20 such steps for the same provider and model key (`max_prompt_overhead`).
 - A model call's price fields (`price_in_per_m`, `price_cache_hit_per_m`, `price_out_per_m`, `price_window`, `price_multiplier`) are the snapshot taken when the request started. Calls to free models and loopback providers store zero prices and `cost_usd = 0`, with their real token counts. `cost_usd` is rounded to 8 decimal places.
@@ -272,6 +277,7 @@ Other views to implement: `v_success_rate`, `v_escape_rate`, `v_route_stats` (pe
 |---|---|---|
 | `0001_initial.sql` | M0.2 | The v1 tables and indexes. |
 | `0002_budget_profiles.sql` | M0.2.5 | `tasks.profile` and `tasks.deferrable` (renamed in `0003`), `attempts.model_mismatch` and `attempts.deferred_until`, `steps.actual_model`, `steps.price_window`, `steps.price_multiplier` and `steps.price_cache_hit_per_m`, `eval_runs.profile`, `eval_results.quota_wait_s`, and the new `quota_usage` table. Existing rows get the defaults, so tasks and eval runs created before `0002` read `profile = 'unknown'`. |
+| `0005_attempt_worktree.sql` | M0.4 | `attempts.base_sha` and `attempts.failure_reason`. Existing attempts read `NULL` in both. |
 | `0004_prompt_overhead.sql` | M0.3 | `steps.provider` and `steps.prompt_overhead_tokens`, plus the index `idx_steps_provider`. Existing steps read `NULL` in both columns. |
 | `0003_rename_deferrable.sql` | M0.2.6 | Renames `tasks.deferrable` to `tasks.is_deferrable`. `DEFERRABLE` is an SQLite keyword, so the old name had to be quoted in every query. Position, type and default are unchanged. |
 
