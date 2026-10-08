@@ -202,6 +202,33 @@ arpeggio eval run --split holdout --repeats 3 --config ~/.arpeggio/profiles/micr
 arpeggio eval report
 ```
 
+### Privacy opt-in and a first run on Windows
+
+An eval run sends your repository's code to the providers it routes to. Under SAF-07 a `private` repo reaches a provider whose `data_use` is `may_train` or `unknown` (DeepSeek in the `micro-deepseek` template) only after an opt-in. The simplest deliberate opt-in for an eval run is the global one, in the config file you pass with `--config` (or in `~/.arpeggio/config.toml`):
+
+```toml
+[privacy]
+allow_training_providers = true
+```
+
+It applies to `private` repos that leave the repo-level key unset. A `client` repo ignores it. To opt in one repo only, add `allow_training_providers = true` under `[repo]` in that repo's existing `.arpeggio/config.toml` with a text editor. That file also holds `check_env` and other settings, so edit it rather than replacing it. If it does not exist yet, create it with a `[repo]` table.
+
+The commands below work in Windows PowerShell 5.1 and PowerShell 7. They read the API key without echoing it and keep it out of the shell history. Unless `arpeggio` is on your `PATH`, run it from the checkout with `uv run --project`:
+
+```powershell
+$arp = "C:\path\to\arpeggio"     # your Arpeggio checkout
+$secure = Read-Host "DeepSeek API key" -AsSecureString
+$bstr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($secure)
+try { $env:DEEPSEEK_API_KEY = [Runtime.InteropServices.Marshal]::PtrToStringBSTR($bstr) }
+finally { [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($bstr) }
+
+uv run --project $arp arpeggio eval check
+uv run --project $arp arpeggio eval run --split all --dry-run --config "$env:USERPROFILE\.arpeggio\config.toml"
+uv run --project $arp arpeggio eval run --split all --config "$env:USERPROFILE\.arpeggio\config.toml" --max-usd 0.10
+uv run --project $arp arpeggio eval report
+Remove-Item Env:DEEPSEEK_API_KEY
+```
+
 ### Recording
 
 `eval_runs` holds the strategy, split, profile, Arpeggio's `git_sha`, the `config_hash` of the effective global config, the repeat count, the planned task runs, the estimate, and the status (`running`, `completed`, `partial` or `aborted`) with its reason. `eval_results` holds one row per task and repeat: status (`solved`, `failed`, `error`, `paused`, `skipped`), the last failure reason or skip reason, cost (attempts plus verification, failed attempts included), attempts, escalations, wall-clock seconds, quota wait (0 until M1.11), the estimate, the counterfactual cost and the task's tags. Each attempt's `route_reason` names the strategy, the step, the requested effort and, for `arpeggio`, the policy rule. The counterfactual cost (CST-05) prices the task's model-call tokens on `[defaults] counterfactual_route` at each call's time and is also stored on `tasks.counterfactual_usd`.

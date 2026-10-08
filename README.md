@@ -66,7 +66,7 @@ The other profiles are `micro-deepseek` (a few dollars of DeepSeek credit), `sta
 
 `arpeggio init` writes to `~/.arpeggio/`, or to `$ARPEGGIO_HOME` when that variable is set. Running it again only adds what is missing and brings the database schema up to date. It never deletes data. Fill in `config.toml` (providers, model ids, prices), then run `arpeggio config validate`. Use `arpeggio config show` to print the merged result. Every command accepts `--json` and prints one JSON object for scripts.
 
-Your personal eval suite lives outside this repo, in `~/.arpeggio/evals/` by default ([how to add a task](docs/06-EVALUATION.md#how-to-add-a-task)). Only `eval run` without `--dry-run` calls models, within a spend cap ([baseline experiment](docs/06-EVALUATION.md#baseline-experiment-four-strategies)):
+The examples call `arpeggio` directly. If it is not on your `PATH`, prefix each command with `uv run --project <path to this checkout>`. Your personal eval suite lives outside this repo, in `~/.arpeggio/evals/` by default ([how to add a task](docs/06-EVALUATION.md#how-to-add-a-task)). Only `eval run` without `--dry-run` calls models, within a spend cap ([baseline experiment](docs/06-EVALUATION.md#baseline-experiment-four-strategies), and [on Windows](docs/06-EVALUATION.md#privacy-opt-in-and-a-first-run-on-windows)):
 
 ```bash
 arpeggio eval new --repo ~/code/skriptif --base 3f2a9c1 --solution 9b81d07 --id skriptif-email-validation
