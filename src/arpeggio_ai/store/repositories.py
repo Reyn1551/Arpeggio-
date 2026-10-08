@@ -1,4 +1,4 @@
-"""Thin repository layer for the trace path: repos, tasks, attempts and steps.
+"""Thin repository layer: repos, tasks, attempts, steps, criteria, verdicts and eval runs.
 
 Records are frozen dataclasses. JSON columns are encoded and decoded here. Every write runs
 in its own transaction (see ``store.db.transaction``). Status values are checked in Python
@@ -46,6 +46,10 @@ StoredProfile = Literal["free", "micro", "standard", "pro", "unknown"]
 PriceWindow = Literal["peak", "offpeak", "flat"]
 CriterionOrigin = Literal["user", "derived"]
 VerdictKind = Literal["check", "full_suite", "model_review", "user_review"]
+Risk = Literal["low", "medium", "high"]
+EvalRunStatus = Literal["running", "completed", "partial", "aborted"]
+EvalResultStatus = Literal["solved", "failed", "error", "paused", "skipped"]
+EvalSplit = Literal["tuning", "holdout", "all"]
 
 FINAL_TASK_STATUSES = frozenset({"merged", "failed", "rejected", "cancelled"})
 FINAL_ATTEMPT_STATUSES = frozenset({"completed", "timeout", "error", "cancelled"})
@@ -278,6 +282,7 @@ def create_task(
     parent_id: str | None = None,
     category: str | None = None,
     budget_usd: float | None = None,
+    risk: Risk | None = None,
 ) -> Task:
     """Create a task. ``profile`` is the budget profile it runs under (BUD-01).
 
@@ -287,13 +292,15 @@ def create_task(
     _require("task profile", profile, BudgetProfile)
     _require("task status", status, TaskStatus)
     _require("task source", source, TaskSource)
+    if risk is not None:
+        _require("task risk", risk, Risk)
     task_id = new_id()
     try:
         with transaction(conn):
             conn.execute(
                 "INSERT INTO tasks (id, repo_id, parent_id, title, request, category, status,"
-                " source, budget_usd, created_at, profile, is_deferrable)"
-                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                " source, budget_usd, created_at, profile, is_deferrable, risk)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     task_id,
                     repo_id,
@@ -307,6 +314,7 @@ def create_task(
                     utc_now(),
                     profile,
                     int(is_deferrable),
+                    risk,
                 ),
             )
     except sqlite3.IntegrityError as error:
@@ -338,6 +346,30 @@ def set_task_status(conn: sqlite3.Connection, task_id: str, status: TaskStatus) 
     if updated == 0:
         raise StoreError(f"unknown task {task_id}")
     return _get_task(conn, task_id)
+
+
+def set_counterfactual(conn: sqlite3.Connection, task_id: str, cost_usd: float) -> Task:
+    """Store the task's counterfactual cost: its tokens priced on the default route (CST-05)."""
+    if not math.isfinite(cost_usd) or cost_usd < 0:
+        raise StoreError(f"counterfactual cost must be >= 0: {cost_usd!r}")
+    with transaction(conn):
+        updated = conn.execute(
+            "UPDATE tasks SET counterfactual_usd = ? WHERE id = ?", (cost_usd, task_id)
+        ).rowcount
+    if updated == 0:
+        raise StoreError(f"unknown task {task_id}")
+    return _get_task(conn, task_id)
+
+
+def task_cost_usd(conn: sqlite3.Connection, task_id: str) -> float:
+    """Attempt costs plus verification costs of one task, failed attempts included."""
+    row = conn.execute(
+        "SELECT (SELECT COALESCE(SUM(cost_usd), 0) FROM attempts WHERE task_id = ?)"
+        " + (SELECT COALESCE(SUM(v.cost_usd), 0) FROM verdicts v"
+        " JOIN attempts a ON a.id = v.attempt_id WHERE a.task_id = ?)",
+        (task_id, task_id),
+    ).fetchone()
+    return float(row[0])
 
 
 # Attempts
@@ -643,3 +675,216 @@ def max_prompt_overhead(
 def list_steps(conn: sqlite3.Connection, attempt_id: str) -> list[Step]:
     rows = conn.execute("SELECT * FROM steps WHERE attempt_id = ? ORDER BY seq", (attempt_id,))
     return [_step(row) for row in rows]
+
+
+# Eval runs and results (M0.6)
+
+
+@dataclass(frozen=True, slots=True)
+class EvalRun:
+    id: str
+    strategy: str
+    split: EvalSplit
+    git_sha: str
+    config_hash: str
+    started_at: str
+    finished_at: str | None
+    summary: dict[str, Any] | None
+    profile: StoredProfile
+    status: EvalRunStatus
+    status_reason: str | None
+    repeats: int
+    planned: int | None
+    estimate_usd: float | None
+
+
+@dataclass(frozen=True, slots=True)
+class EvalResult:
+    eval_run_id: str
+    eval_task: str
+    task_id: str | None
+    solved: bool
+    cost_usd: float
+    attempts: int
+    duration_s: float
+    quota_wait_s: float
+    repeat_index: int
+    status: EvalResultStatus
+    status_reason: str | None
+    escalations: int
+    estimate_usd: float | None
+    counterfactual_usd: float | None
+    tags: list[str] | None
+
+
+def _eval_run(row: sqlite3.Row) -> EvalRun:
+    return EvalRun(**_row(row, json_cols=("summary",)))
+
+
+def _eval_result(row: sqlite3.Row) -> EvalResult:
+    return EvalResult(**_row(row, json_cols=("tags",), bool_cols=("solved",)))
+
+
+def create_eval_run(
+    conn: sqlite3.Connection,
+    *,
+    strategy: str,
+    split: EvalSplit,
+    git_sha: str,
+    config_hash: str,
+    profile: BudgetProfile,
+    repeats: int,
+    planned: int,
+    estimate_usd: float,
+) -> EvalRun:
+    """Start an eval run with status ``running``."""
+    _require("split", split, EvalSplit)
+    _require("eval run profile", profile, BudgetProfile)
+    if repeats < 1:
+        raise StoreError("repeats must be >= 1")
+    run_id = new_id()
+    with transaction(conn):
+        conn.execute(
+            "INSERT INTO eval_runs (id, strategy, split, git_sha, config_hash, started_at,"
+            " profile, status, repeats, planned, estimate_usd)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, 'running', ?, ?, ?)",
+            (
+                run_id,
+                strategy,
+                split,
+                git_sha,
+                config_hash,
+                utc_now(),
+                profile,
+                repeats,
+                planned,
+                estimate_usd,
+            ),
+        )
+    return _get_eval_run(conn, run_id)
+
+
+def get_eval_run(conn: sqlite3.Connection, run_id: str) -> EvalRun | None:
+    row = conn.execute("SELECT * FROM eval_runs WHERE id = ?", (run_id,)).fetchone()
+    return None if row is None else _eval_run(row)
+
+
+def _get_eval_run(conn: sqlite3.Connection, run_id: str) -> EvalRun:
+    run = get_eval_run(conn, run_id)
+    if run is None:
+        raise StoreError(f"unknown eval run {run_id}")
+    return run
+
+
+def list_eval_runs(conn: sqlite3.Connection) -> list[EvalRun]:
+    """Every eval run, oldest first."""
+    rows = conn.execute("SELECT * FROM eval_runs ORDER BY started_at, rowid")
+    return [_eval_run(row) for row in rows]
+
+
+def finish_eval_run(
+    conn: sqlite3.Connection,
+    run_id: str,
+    status: EvalRunStatus,
+    *,
+    reason: str | None = None,
+    summary: dict[str, Any] | None = None,
+) -> EvalRun:
+    """Close a run: ``completed``, ``partial`` (stopped early, with a reason) or ``aborted``."""
+    _require("eval run status", status, EvalRunStatus)
+    with transaction(conn):
+        updated = conn.execute(
+            "UPDATE eval_runs SET status = ?, status_reason = ?, summary = ?, finished_at = ?"
+            " WHERE id = ?",
+            (status, reason, _dumps(summary), utc_now(), run_id),
+        ).rowcount
+    if updated == 0:
+        raise StoreError(f"unknown eval run {run_id}")
+    return _get_eval_run(conn, run_id)
+
+
+def add_eval_result(
+    conn: sqlite3.Connection,
+    run_id: str,
+    eval_task: str,
+    *,
+    repeat_index: int,
+    status: EvalResultStatus,
+    task_id: str | None = None,
+    cost_usd: float = 0.0,
+    attempts: int = 0,
+    duration_s: float = 0.0,
+    escalations: int = 0,
+    estimate_usd: float | None = None,
+    counterfactual_usd: float | None = None,
+    status_reason: str | None = None,
+    tags: list[str] | None = None,
+) -> EvalResult:
+    """Store the outcome of one task run. ``solved`` follows from ``status``."""
+    _require("eval result status", status, EvalResultStatus)
+    if status != "skipped" and task_id is None:
+        raise StoreError("only a skipped result may have no task")
+    try:
+        with transaction(conn):
+            conn.execute(
+                "INSERT INTO eval_results (eval_run_id, eval_task, task_id, solved, cost_usd,"
+                " attempts, duration_s, repeat_index, status, status_reason, escalations,"
+                " estimate_usd, counterfactual_usd, tags)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    run_id,
+                    eval_task,
+                    task_id,
+                    int(status == "solved"),
+                    cost_usd,
+                    attempts,
+                    duration_s,
+                    repeat_index,
+                    status,
+                    status_reason,
+                    escalations,
+                    estimate_usd,
+                    counterfactual_usd,
+                    _dumps(tags),
+                ),
+            )
+    except sqlite3.IntegrityError as error:
+        raise StoreError(f"cannot add eval result: {error}") from error
+    row = conn.execute(
+        "SELECT * FROM eval_results WHERE eval_run_id = ? AND eval_task = ? AND repeat_index = ?",
+        (run_id, eval_task, repeat_index),
+    ).fetchone()
+    return _eval_result(row)
+
+
+def list_eval_results(conn: sqlite3.Connection, run_id: str) -> list[EvalResult]:
+    rows = conn.execute(
+        "SELECT * FROM eval_results WHERE eval_run_id = ? ORDER BY rowid", (run_id,)
+    )
+    return [_eval_result(row) for row in rows]
+
+
+def list_task_attempts(conn: sqlite3.Connection, task_id: str) -> list[Attempt]:
+    rows = conn.execute("SELECT * FROM attempts WHERE task_id = ? ORDER BY seq", (task_id,))
+    return [_attempt(row) for row in rows]
+
+
+_EVAL_TASKS = "SELECT task_id FROM eval_results WHERE task_id IS NOT NULL"
+
+
+def month_eval_spend_usd(conn: sqlite3.Connection, month: str) -> float:
+    """Attempt and verification costs of tasks linked to eval results and created in
+    ``month`` (``YYYY-MM``, UTC). Tasks without an eval result never count."""
+    pattern = f"{month}-%"
+    attempts = conn.execute(
+        "SELECT COALESCE(SUM(a.cost_usd), 0) FROM attempts a JOIN tasks t ON t.id = a.task_id"
+        f" WHERE t.created_at LIKE ? AND t.id IN ({_EVAL_TASKS})",
+        (pattern,),
+    ).fetchone()
+    verdicts = conn.execute(
+        "SELECT COALESCE(SUM(v.cost_usd), 0) FROM verdicts v"
+        " JOIN attempts a ON a.id = v.attempt_id JOIN tasks t ON t.id = a.task_id"
+        f" WHERE t.created_at LIKE ? AND t.id IN ({_EVAL_TASKS})",
+        (pattern,),
+    ).fetchone()
+    return float(attempts[0]) + float(verdicts[0])
