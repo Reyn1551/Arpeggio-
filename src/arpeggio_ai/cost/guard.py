@@ -37,6 +37,11 @@ _PLACEHOLDER = re.compile(r"<.*>")
 GUARD_CHARS_PER_TOKEN = 2
 
 
+def is_placeholder(provider_model: str) -> bool:
+    """True for a template placeholder id such as ``<free-model-id>``."""
+    return _PLACEHOLDER.fullmatch(provider_model) is not None
+
+
 def prompt_overhead(config: Config, model_key: str, observed_tokens: int = 0) -> int:
     """Overhead to assume for the next call: max(configured, observed)."""
     spec = config.models[model_key]
@@ -59,7 +64,7 @@ def check_call(
     """Raise ``SpendRefused`` if the call must not be sent, else return its price snapshot."""
     spec = config.models[model_key]
     provider = config.providers[spec.provider]
-    if _PLACEHOLDER.fullmatch(spec.model):
+    if is_placeholder(spec.model):
         raise SpendRefused(f"model {model_key} still has a placeholder id; edit your config")
     if config.budget.profile == "free" and not (spec.free or is_loopback_url(provider.base_url)):
         raise SpendRefused(f"model {model_key} is not free; current profile is free")

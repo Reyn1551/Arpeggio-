@@ -1,0 +1,26 @@
+# Arpeggio routing policy v1 (RTE-04): rules over tiers and efforts, first match wins.
+# Override it with <ARPEGGIO_HOME>/policy.yaml (a full replacement, not a merge).
+# tier: N means the cheapest allowed model of tier N, or the nearest tier present
+# (lower first). tier: strongest means the strongest allowed model.
+version: 1
+rules:
+  - id: high-risk
+    when: { risk: high }
+    route: { tier: strongest, effort: high }
+    escalation: []
+  - id: docs-and-config
+    when: { risk: low, category: [docs, config] }
+    route: { tier: 1, effort: low }
+    escalation: [ { tier: 2, effort: medium } ]
+  - id: low-risk-code
+    when: { risk: low }
+    route: { tier: 2, effort: low }
+    escalation: [ { tier: 2, effort: high }, { tier: strongest, effort: high } ]
+  - id: medium-default
+    when: { risk: medium }
+    route: { tier: 2, effort: medium }
+    escalation: [ { tier: strongest, effort: high } ]
+  - id: fallback
+    when: {}
+    route: { tier: strongest, effort: high }
+    escalation: []
