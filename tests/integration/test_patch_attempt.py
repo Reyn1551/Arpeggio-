@@ -417,3 +417,39 @@ def test_patch_on_redacted_lines_logs_and_does_not_apply(home: Path, tmp_path: P
         assert event["paths"] == ["src/calc/settings.py"]
     finally:
         harness.conn.close()
+
+
+def test_patch_copying_a_placeholder_fails_the_attempt(home: Path, tmp_path: Path) -> None:
+    repo = repo_with_settings(tmp_path / "repo")
+    harness = E2E(home, repo)
+    try:
+        harness.criteria({"kind": "command", "argv": [*PYTEST, "tests/test_ok.py"]})
+        # The model saw the redacted file and wrote the placeholder into a new line.
+        diff = """```diff
+--- a/src/calc/settings.py
++++ b/src/calc/settings.py
+@@ -2 +2,2 @@
+ DEBUG = False
++BACKUP_KEY = "[REDACTED:configured_key]"
+```"""
+        outcome = harness.run(
+            FakeProvider(ok(diff)),
+            env={"DEEPSEEK_API_KEY": LEAK_KEY},
+            context_files=["src/calc/settings.py"],
+        )
+        assert (outcome.attempt_status, outcome.task_status, outcome.failure_reason) == (
+            "error",
+            "failed",
+            "patch_writes_redacted_placeholder",
+        )
+        failure = harness.steps(outcome)[-1]
+        assert failure.summary == (
+            "patch_writes_redacted_placeholder: added lines contain a [REDACTED:...]"
+            " placeholder at src/calc/settings.py:3"
+        )
+        assert "BACKUP_KEY" not in failure.summary
+        worktree = Path(str(harness.attempt(outcome).worktree))
+        assert (worktree / "src/calc/settings.py").read_text() == SETTINGS
+        assert run_git(worktree, "status", "--porcelain") == ""
+    finally:
+        harness.conn.close()

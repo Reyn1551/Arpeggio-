@@ -3,9 +3,11 @@
 The model answers with exactly one fenced ``diff`` (or ``patch``) block. Before anything
 touches the worktree the diff is checked: at most 200 KB, every path relative, without
 ``..``, outside ``.git``, not C-quoted and resolving inside the worktree, no binary data,
-no symlinks. ``git apply --check`` and ``git apply`` then run with the scrubbed
-environment, the changed files must be exactly paths the diff declared, and the result is
-committed on the attempt branch as ``Arpeggio <arpeggio@localhost>``.
+no symlinks, and no added line holding a ``[REDACTED:`` placeholder copied from the
+redacted context (``patch_writes_redacted_placeholder``). ``git apply --check`` and
+``git apply`` then run with the scrubbed environment, the changed files must be exactly
+paths the diff declared, and the result is committed on the attempt branch as
+``Arpeggio <arpeggio@localhost>``.
 
 Line endings are normalized per file before ``git apply`` (EXE-08). Each modified or
 deleted file is classified from the worktree: ``crlf`` when at least 95% of its line breaks
@@ -45,6 +47,7 @@ FailureReason = Literal[
     "patch_does_not_apply",
     "patch_mixed_line_endings",
     "patch_line_endings_changed",
+    "patch_writes_redacted_placeholder",
 ]
 Ending = Literal["crlf", "lf", "mixed"]
 MAX_PATCH_BYTES = 200 * 1024
@@ -57,6 +60,7 @@ SECRET_PATTERNS = (".env*", "*.pem", "*.key", "id_*", "*credentials*", "secrets.
 
 _FENCE = re.compile(r"^ {0,3}(`{3,}|~{3,})[ \t]*([^\s`~]*)")
 _HUNK = re.compile(r"^@@ -\d+(?:,(\d+))? \+\d+(?:,(\d+))? @@")
+_HUNK_NEW_START = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)")
 _DIFF_GIT = re.compile(r"^diff --git a/(.+) b/(.+)$")
 _DRIVE = re.compile(r"^[A-Za-z]:")
 _SYMLINK_MODE = re.compile(r"^(new file|deleted file|old|new) mode 120000\s*$")
@@ -185,6 +189,14 @@ def validate_patch(diff: str, worktree: Path) -> list[str]:
         problem = _path_problem(path, worktree)
         if problem is not None:
             raise PatchError("patch_unsafe", f"{path}: {problem}")
+    placeholders = redacted_added_lines(parse_diff(diff))
+    if placeholders:
+        # Paths and line numbers only: the lines themselves may sit next to real secrets.
+        where = ", ".join(f"{path}:{line}" for path, line in placeholders)
+        raise PatchError(
+            "patch_writes_redacted_placeholder",
+            f"added lines contain a {REDACTION_MARKER}...] placeholder at {where}",
+        )
     return sorted(declared)
 
 
@@ -266,6 +278,24 @@ def parse_diff(diff: str) -> ParsedDiff:
             sections[current].new = line[len("rename to ") :]
         kinds.append(("header", len(sections) - 1))
     return ParsedDiff(lines, kinds, sections)
+
+
+def redacted_added_lines(parsed: ParsedDiff) -> list[tuple[str, int]]:
+    """``(path, line in the new file)`` for every added line holding a ``[REDACTED:`` marker."""
+    found: list[tuple[str, int]] = []
+    line_number = 0
+    for line, (kind, index) in zip(parsed.lines, parsed.kinds, strict=True):
+        if kind == "hunk":
+            start = _HUNK_NEW_START.match(line)
+            line_number = int(start.group(1)) if start else 0
+        elif kind == "context":
+            line_number += 1
+        elif kind == "added":
+            if REDACTION_MARKER in line and index >= 0:
+                section = parsed.sections[index]
+                found.append((section.new or section.old or "?", line_number))
+            line_number += 1
+    return found
 
 
 def redacted_hunk_paths(parsed: ParsedDiff) -> list[str]:
