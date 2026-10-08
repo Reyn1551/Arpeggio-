@@ -12,7 +12,9 @@ paths the diff declared, and the result is committed on the attempt branch as
 Hunk counts are recounted from the hunk bodies (M0.7) when the reply ended with
 ``finish_reason`` ``stop``: models often get the ``@@`` counts wrong while the lines are
 right. A truncated reply is never recounted, so a cut-off diff still fails as
-``output_truncated``. A line inside a hunk that is not a diff line is ``patch_malformed``.
+``output_truncated``. A line inside a hunk that is not a diff line is ``patch_malformed``,
+and so is a non-rename section whose ``diff --git``, ``---`` and ``+++`` headers name two
+different files or a ``diff --git`` line that is not ``a/<path> b/<path>``.
 The prompt lists the exact context paths as the only files to modify, and a diff that
 modifies, deletes or renames a path missing from the worktree's base commit (``git
 ls-files`` in the attempt worktree, compared exactly) is ``patch_unknown_path``.
@@ -213,6 +215,9 @@ def validate_patch(diff: str, worktree: Path) -> list[str]:
         problem = _path_problem(path, worktree)
         if problem is not None:
             raise PatchError("patch_unsafe", f"{path}: {problem}")
+    problem = header_problem(parse_diff(diff))
+    if problem is not None:
+        raise PatchError("patch_malformed", problem)
     placeholders = redacted_added_lines(parse_diff(diff))
     if placeholders:
         # Paths and line numbers only: the lines themselves may sit next to real secrets.
@@ -379,6 +384,39 @@ def redacted_added_lines(parsed: ParsedDiff) -> list[tuple[str, int]]:
                 found.append((section.new or section.old or "?", line_number))
             line_number += 1
     return found
+
+
+def header_problem(parsed: ParsedDiff) -> str | None:
+    """Why the headers of a non-rename, non-copy file section name two different files.
+
+    ``diff --git`` must read ``a/<path> b/<path>``, and those paths and the ``---``/``+++``
+    paths (``/dev/null`` aside) must all be the same file (M0.7).
+    """
+    names: dict[int, list[str]] = {}
+    moved: set[int] = set()
+    for line, (kind, index) in zip(parsed.lines, parsed.kinds, strict=True):
+        line = line.rstrip("\r")
+        if kind != "header" or index < 0:
+            continue
+        if line.startswith("diff --git "):
+            match = _DIFF_GIT.match(line)
+            if match is None:
+                left, _, right = line[len("diff --git ") :].partition(" ")
+                return f"diff --git needs a/<path> b/<path>, got {left} and {right}"
+            names.setdefault(index, []).extend(match.groups())
+        elif line.startswith(("rename from ", "rename to ", "copy from ", "copy to ")):
+            moved.add(index)
+        elif line.startswith(("--- ", "+++ ")):
+            path = _header_path(line[4:])
+            if path is not None:
+                names.setdefault(index, []).append(path)
+    for index, paths in sorted(names.items()):
+        if index in moved:
+            continue
+        different = sorted(set(paths))
+        if len(different) > 1:
+            return f"the a/ and b/ paths name different files: {different[0]} and {different[1]}"
+    return None
 
 
 def unknown_paths(parsed: ParsedDiff, tracked: Collection[str]) -> list[str]:

@@ -219,6 +219,13 @@ def test_model_claiming_success_without_a_diff_is_not_believed(e2e: E2E) -> None
             "-a\n+b\n```",
             "patch_unknown_path",
         ),
+        (
+            FIX.replace(
+                "diff --git a/src/calc/ops.py b/src/calc/ops.py",
+                "diff --git b/src/calc/ops.py a/src/calc/ops.py",
+            ),
+            "patch_malformed",
+        ),
     ],
 )
 def test_patch_failures_store_a_reason(e2e: E2E, reply: str, reason: str) -> None:
