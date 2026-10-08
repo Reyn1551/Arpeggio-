@@ -63,3 +63,11 @@ def test_runtime_subdirs() -> None:
         "logs",
         "backups",
     )
+
+
+def test_evals_dir_precedence(home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv(paths.EVALS_ENV_VAR, raising=False)
+    assert paths.evals_dir() == home / "evals"
+    assert paths.evals_dir(str(tmp_path / "cfg")) == tmp_path / "cfg"
+    monkeypatch.setenv(paths.EVALS_ENV_VAR, str(tmp_path / "env"))
+    assert paths.evals_dir(str(tmp_path / "cfg")) == tmp_path / "env"

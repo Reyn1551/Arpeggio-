@@ -7,6 +7,7 @@ at fault. The field reference lives in docs/05-ROUTING-AND-COST.md.
 """
 
 import re
+from pathlib import Path
 from collections.abc import Mapping
 from datetime import date, datetime
 from typing import Annotated, Any, Literal, Self
@@ -380,6 +381,21 @@ class PrivacySettings(_Model):
     allow_training_providers: bool = False
 
 
+class EvalsSettings(_Model):
+    """Global ``[evals]`` table. Only allowed in the global config."""
+
+    # Absolute path of the personal eval suite. None means <home>/evals. ARPEGGIO_EVALS_DIR
+    # overrides it.
+    dir: str | None = None
+
+    @field_validator("dir")
+    @classmethod
+    def _absolute(cls, value: str | None) -> str | None:
+        if value is not None and not Path(value).expanduser().is_absolute():
+            raise PydanticCustomError("absolute_path", "evals dir must be an absolute path")
+        return value
+
+
 class RepoSettings(_Model):
     privacy_class: PrivacyClass = "private"
     provider_allow: list[ProviderName] | None = None
@@ -405,6 +421,7 @@ class Config(_Model):
     models: dict[ModelKey, ModelSpec] = Field(min_length=1)
     defaults: Defaults
     privacy: PrivacySettings = Field(default_factory=PrivacySettings)
+    evals: EvalsSettings = Field(default_factory=EvalsSettings)
     repo: RepoSettings = Field(default_factory=RepoSettings)
 
     def allows_training_providers(self) -> bool:

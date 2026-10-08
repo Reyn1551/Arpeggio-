@@ -134,6 +134,14 @@ def load_config(repo: Path | None = None) -> Config:
                         "Use allow_training_providers under [repo] instead.",
                     )
                 )
+            if repo_raw is not None and "evals" in repo_raw:
+                issues.append(
+                    ConfigIssue(
+                        file=str(repo_path),
+                        field="evals",
+                        message="[evals] is only allowed in the global config",
+                    )
+                )
 
     if issues or global_raw is None:
         raise ConfigError(issues)
