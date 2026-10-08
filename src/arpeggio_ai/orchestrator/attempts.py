@@ -128,6 +128,8 @@ def record_step(
         price_cache_hit_per_m=None if price is None else price.cache_hit_per_m,
         provider=event.provider,
         prompt_overhead_tokens=event.prompt_overhead_tokens,
+        finish_reason=event.finish_reason,
+        reasoning_tokens=event.reasoning_tokens,
     )
     if event.model_mismatch:
         set_model_mismatch(conn, spec.attempt_id, True)

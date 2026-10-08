@@ -966,3 +966,60 @@ def test_guard_sizes_the_redacted_prompt(harness: Harness, monkeypatch: pytest.M
     run = harness.run(FakeProvider(ok("done")), prompt=prompt, env={"DEEPSEEK_API_KEY": secret})
     assert run.result.status == "completed"
     assert seen == [len("key [REDACTED:configured_key] end")]
+
+
+# 12. Truncation and reasoning (M0.6.1)
+
+
+def thinking(
+    content: str | None, finish: str = "length", reasoning: str = "", tokens: Any = 4000
+) -> httpx.Response:
+    """A forced-thinking reply: reasoning in reasoning_content, the answer in content."""
+    usage = deepseek_usage(completion=4096)
+    usage["completion_tokens_details"] = {"reasoning_tokens": tokens}
+    body = completion("", usage=usage)
+    body["choices"][0]["finish_reason"] = finish
+    body["choices"][0]["message"] = {
+        "role": "assistant",
+        "content": content,
+        "reasoning_content": reasoning,
+    }
+    return httpx.Response(200, json=body)
+
+
+def test_length_finish_is_recorded_and_marks_the_result_truncated(harness: Harness) -> None:
+    run = harness.run(FakeProvider(thinking(None, reasoning="thinking...")))
+    assert (run.result.status, run.result.final_message) == ("completed", "")
+    assert run.result.truncated is True
+    [step] = run.steps
+    assert (step.finish_reason, step.reasoning_tokens, step.output_tokens) == ("length", 4000, 4096)
+    assert step.summary == "(empty reply)"
+
+
+@pytest.mark.parametrize("finish", ["length", "max_tokens"])
+def test_truncated_finish_reasons(harness: Harness, finish: str) -> None:
+    assert harness.run(FakeProvider(thinking("x", finish))).result.truncated is True
+
+
+def test_stop_finish_is_not_truncated(harness: Harness) -> None:
+    run = harness.run(FakeProvider(ok("Hi")))
+    assert run.result.truncated is False
+    assert (run.steps[0].finish_reason, run.steps[0].reasoning_tokens) == ("stop", None)
+
+
+def test_reasoning_content_is_never_the_reply(harness: Harness) -> None:
+    run = harness.run(FakeProvider(thinking("", "stop", reasoning="```diff\n+x\n```")))
+    assert run.result.final_message == ""
+    assert run.steps[0].summary == "(empty reply)"
+
+
+@pytest.mark.parametrize("tokens", [-1, True, "12", 1.5, None])
+def test_unusable_reasoning_counts_are_not_recorded(harness: Harness, tokens: Any) -> None:
+    run = harness.run(FakeProvider(thinking("x", "stop", tokens=tokens)))
+    assert run.steps[0].reasoning_tokens is None
+
+
+def test_only_the_last_turn_decides_truncation(harness: Harness) -> None:
+    run = harness.run(FakeProvider(thinking("one"), ok("two")), follow_ups=["again"])
+    assert run.result.truncated is False
+    assert [step.finish_reason for step in run.steps] == ["length", "stop"]

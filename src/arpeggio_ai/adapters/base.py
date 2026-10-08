@@ -78,6 +78,8 @@ class StepEvent:
     model_mismatch: bool = False
     provider: str | None = None  # provider that served a model call
     prompt_overhead_tokens: int | None = None  # input tokens beyond our prompt estimate
+    finish_reason: str | None = None  # why the provider stopped, as it said
+    reasoning_tokens: int | None = None  # part of output_tokens the provider calls reasoning
 
 
 @dataclass(frozen=True, slots=True)
@@ -85,6 +87,7 @@ class AttemptResult:
     status: AttemptStatus
     final_message: str
     changed_files: list[str] = field(default_factory=list)
+    truncated: bool = False  # the last reply stopped at the output limit
 
 
 async def _sleep(seconds: float) -> None:
