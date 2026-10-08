@@ -20,6 +20,7 @@ from arpeggio_ai.store.repositories import (
     list_verdicts,
     register_repo,
 )
+from arpeggio_ai.verify import runner as runner_module
 from arpeggio_ai.verify.runner import run_criteria
 
 PYTEST = [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider"]
@@ -196,3 +197,34 @@ def test_output_limit_fails_the_check(
     assert verdict.detail is not None
     assert (verdict.detail["output_limit_exceeded"], verdict.detail["timed_out"]) == (True, False)
     assert verdict.detail["exit_code"] is None
+
+
+def test_each_verdict_is_stored_before_the_next_check_runs(
+    db: sqlite3.Connection,
+    artifacts: ArtifactStore,
+    task: Task,
+    attempt: Attempt,
+    repo: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """NFR-03: a crash after the first of three checks keeps the first verdict."""
+    for _ in range(3):
+        add(db, task, kind="command", argv=[*PYTEST, "tests/test_ok.py"])
+    real = runner_module._run_command
+    calls = 0
+
+    async def crash_on_second(*args: Any, **kwargs: Any) -> Any:
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise RuntimeError("simulated crash")
+        return await real(*args, **kwargs)
+
+    monkeypatch.setattr(runner_module, "_run_command", crash_on_second)
+    with pytest.raises(RuntimeError, match="simulated crash"):
+        verify(db, artifacts, task, attempt, repo)
+    stored = list_verdicts(db, attempt.id)
+    assert len(stored) == 1
+    assert stored[0].passed is True
+    assert stored[0].log_ref == f"{task.id}/{attempt.id}/check-1.log"
+    assert not db.in_transaction

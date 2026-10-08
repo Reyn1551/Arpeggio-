@@ -86,31 +86,37 @@ class CheckResult:
     log_ref: str | None
 
 
+async def _run_spec(
+    number: int, criterion: Spec, worktree: Path, env: Mapping[str, str], write_log: WriteLog
+) -> CheckResult:
+    log_ref = None
+    if isinstance(criterion, CommandCriterion):
+        name = f"check-{number}.log"
+        passed, detail, output = await _run_command(criterion, worktree, env, name)
+        log_ref = write_log(name, output)
+    else:
+        passed, detail = _file_exists(criterion, worktree)
+    log.info(
+        "verify.check",
+        extra={
+            "check": number,
+            "criterion_kind": criterion.kind,
+            "passed": passed,
+            "timed_out": bool(detail.get("timed_out")),
+        },
+    )
+    return CheckResult(passed, detail, log_ref)
+
+
 async def run_specs(
     specs: Sequence[Spec], *, worktree: Path, env: Mapping[str, str], write_log: WriteLog
 ) -> list[CheckResult]:
     """Run every spec in order, even after a failure. ``write_log(name, output)`` stores a
     command's redacted output and returns its reference."""
-    results: list[CheckResult] = []
-    for number, criterion in enumerate(specs, start=1):
-        log_ref = None
-        if isinstance(criterion, CommandCriterion):
-            name = f"check-{number}.log"
-            passed, detail, output = await _run_command(criterion, worktree, env, name)
-            log_ref = write_log(name, output)
-        else:
-            passed, detail = _file_exists(criterion, worktree)
-        log.info(
-            "verify.check",
-            extra={
-                "check": number,
-                "criterion_kind": criterion.kind,
-                "passed": passed,
-                "timed_out": bool(detail.get("timed_out")),
-            },
-        )
-        results.append(CheckResult(passed, detail, log_ref))
-    return results
+    return [
+        await _run_spec(number, criterion, worktree, env, write_log)
+        for number, criterion in enumerate(specs, start=1)
+    ]
 
 
 async def run_criteria(
@@ -122,23 +128,27 @@ async def run_criteria(
     worktree: Path,
     env: Mapping[str, str],
 ) -> list[Verdict]:
-    """Run every criterion of the task, store a verdict for each, and return them in order."""
-    rows = list_criteria(conn, task_id)
-    results = await run_specs(
-        [row.parsed() for row in rows],
-        worktree=worktree,
-        env=env,
-        write_log=lambda name, data: artifacts.write(task_id, attempt_id, name, data),
-    )
-    return [
-        add_verdict(
-            conn,
-            attempt_id,
-            kind="check",
-            passed=result.passed,
-            criterion_id=row.id,
-            detail=result.detail,
-            log_ref=result.log_ref,
+    """Run every criterion of the task, store a verdict for each, and return them in order.
+
+    Each verdict is committed in its own transaction as soon as its check finishes, so a
+    crash later in the run never loses the verdicts already reached (NFR-03).
+    """
+
+    def write_log(name: str, data: bytes) -> str:
+        return artifacts.write(task_id, attempt_id, name, data)
+
+    verdicts: list[Verdict] = []
+    for number, row in enumerate(list_criteria(conn, task_id), start=1):
+        result = await _run_spec(number, row.parsed(), worktree, env, write_log)
+        verdicts.append(
+            add_verdict(
+                conn,
+                attempt_id,
+                kind="check",
+                passed=result.passed,
+                criterion_id=row.id,
+                detail=result.detail,
+                log_ref=result.log_ref,
+            )
         )
-        for row, result in zip(rows, results, strict=True)
-    ]
+    return verdicts
