@@ -7,6 +7,7 @@ from typing import Any
 import pytest
 from gitrepo import link_directory, make_repo
 
+from arpeggio_ai.safety import process as process_module
 from arpeggio_ai.safety.process import scrubbed_env
 from arpeggio_ai.store.artifacts import ArtifactStore
 from arpeggio_ai.store.repositories import (
@@ -176,3 +177,22 @@ def test_no_criteria_gives_no_verdicts(
     db: sqlite3.Connection, artifacts: ArtifactStore, task: Task, attempt: Attempt, repo: Path
 ) -> None:
     assert verify(db, artifacts, task, attempt, repo) == []
+
+
+def test_output_limit_fails_the_check(
+    db: sqlite3.Connection,
+    artifacts: ArtifactStore,
+    task: Task,
+    attempt: Attempt,
+    repo: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(process_module, "MAX_TEMP_OUTPUT_BYTES", 1024 * 1024)
+    monkeypatch.setattr(process_module, "POLL_S", 0.1)
+    flood = "import sys\nwhile True: sys.stdout.write('y' * 999 + '\\n')"
+    add(db, task, kind="command", argv=[sys.executable, "-c", flood], timeout_s=60)
+    [verdict] = verify(db, artifacts, task, attempt, repo)
+    assert verdict.passed is False
+    assert verdict.detail is not None
+    assert (verdict.detail["output_limit_exceeded"], verdict.detail["timed_out"]) == (True, False)
+    assert verdict.detail["exit_code"] is None

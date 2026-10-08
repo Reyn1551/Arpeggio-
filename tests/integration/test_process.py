@@ -174,3 +174,70 @@ def test_output_at_the_cap_is_kept_whole(tmp_path: Path, monkeypatch: pytest.Mon
 
 def test_default_cap_is_10_mb() -> None:
     assert process_module.MAX_OUTPUT_BYTES == 10 * 1024 * 1024
+
+
+# Hard limit on the temporary output file
+
+
+FLOOD_SCRIPT = """
+import os, subprocess, sys
+child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(120)"])
+with open(sys.argv[1], "w") as f:
+    f.write(f"{os.getpid()} {child.pid}")
+line = "x" * 999 + "\\n"
+while True:
+    sys.stdout.write(line)
+"""
+
+
+@pytest.fixture
+def out_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    path = tmp_path / "check-output"
+    path.mkdir()
+    monkeypatch.setattr(process_module, "OUTPUT_TMP_DIR", path)
+    return path
+
+
+def test_flooding_check_is_killed_by_the_output_limit(
+    tmp_path: Path, out_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(process_module, "MAX_TEMP_OUTPUT_BYTES", 2 * 1024 * 1024)
+    monkeypatch.setattr(process_module, "MAX_OUTPUT_BYTES", 1000)
+    monkeypatch.setattr(process_module, "POLL_S", 0.1)
+    pids = tmp_path / "pids.txt"
+    script = tmp_path / "flood.py"
+    script.write_text(FLOOD_SCRIPT)
+    started = time.monotonic()
+    result = run([PY, str(script), str(pids)], tmp_path, timeout_s=60)
+    assert time.monotonic() - started < 30, "the size limit should fire long before the timeout"
+    assert (result.output_limit_exceeded, result.timed_out, result.exit_code) == (True, False, None)
+    assert result.output.startswith(b"[arpeggio: output truncated, kept the last 1000 of ")
+    assert result.output.rstrip().endswith(b"x")  # Windows text-mode stdout writes \r\n
+    parent, child = (int(value) for value in pids.read_text().split())
+    assert wait_gone(parent), "parent survived the output limit"
+    assert wait_gone(child), "child survived the output limit"
+    assert list(out_dir.iterdir()) == []
+
+
+@pytest.mark.parametrize(
+    ("code", "timeout_s"),
+    [("print('ok')", 30), ("raise SystemExit(2)", 30), ("import time; time.sleep(30)", 1)],
+    ids=["pass", "fail", "timeout"],
+)
+def test_temp_output_is_deleted(tmp_path: Path, out_dir: Path, code: str, timeout_s: int) -> None:
+    result = run([PY, "-c", code], tmp_path, timeout_s=timeout_s)
+    assert result.output_limit_exceeded is False
+    assert list(out_dir.iterdir()) == []
+
+
+def test_temp_output_is_deleted_when_the_process_cannot_start(
+    tmp_path: Path, out_dir: Path
+) -> None:
+    with pytest.raises(ProcessError, match="cannot start"):
+        run([PY, "-c", "print(1)"], tmp_path / "missing-cwd")
+    assert list(out_dir.iterdir()) == []
+
+
+def test_default_temp_limit_is_100_mb() -> None:
+    assert process_module.MAX_TEMP_OUTPUT_BYTES == 100 * 1024 * 1024
+    assert process_module.POLL_S == 0.5

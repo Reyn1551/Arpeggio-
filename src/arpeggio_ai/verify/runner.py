@@ -3,7 +3,8 @@
 An attempt is judged only by these checks, never by what the model says (VER-01). Every
 criterion runs, in stored order, even after a failure, so the verdicts show the whole
 picture (VER-04). Command output goes to an artifact ``check-<n>.log``, and the verdict
-keeps the exit code, duration, timeout flag and the last 2,000 characters of output.
+keeps the exit code, duration, the timeout and output-limit flags and the last 2,000
+characters of output.
 """
 
 import logging
@@ -35,16 +36,22 @@ async def _run_command(
             "expect_exit": criterion.expect_exit,
             "duration_s": 0.0,
             "timed_out": False,
+            "output_limit_exceeded": False,
             "error": str(error),
             "output_tail": str(error),
         }
         return False, detail, str(error).encode("utf-8")
-    passed = not result.timed_out and result.exit_code == criterion.expect_exit
+    passed = (
+        not result.timed_out
+        and not result.output_limit_exceeded
+        and result.exit_code == criterion.expect_exit
+    )
     detail = {
         "exit_code": result.exit_code,
         "expect_exit": criterion.expect_exit,
         "duration_s": result.duration_s,
         "timed_out": result.timed_out,
+        "output_limit_exceeded": result.output_limit_exceeded,
         "output_tail": result.text()[-OUTPUT_TAIL_CHARS:],
     }
     return passed, detail, result.output
