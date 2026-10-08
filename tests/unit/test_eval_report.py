@@ -1,6 +1,7 @@
 """Eval report on a constructed result set with known answers (EVL-05, EVL-06)."""
 
 import sqlite3
+from collections import Counter
 from pathlib import Path
 
 import pytest
@@ -13,9 +14,12 @@ from arpeggio_ai.evals.report import (
     build_report,
     cost_per_solved,
     paired_bootstrap,
+    prompt_redactions,
     render_markdown,
     success_rate,
 )
+from arpeggio_ai.orchestrator.attempts import _record_prompt
+from arpeggio_ai.store.artifacts import ArtifactStore
 from arpeggio_ai.store.repositories import (
     add_eval_result,
     add_verdict,
@@ -328,6 +332,9 @@ def test_attempt_outcomes_and_reasoning_share(db: sqlite3.Connection, repo_id: s
         (None, False, [(500, 300)]),  # checks_failed
         (None, True, [(400, 0)]),  # solved: no failure kind
         ("patch_unsafe", None, [(50, None)]),  # not a listed kind
+        ("patch_unknown_path", None, [(60, None)]),
+        ("patch_malformed", None, [(70, None)]),
+        ("patch_malformed", None, [(80, None)]),
     ]
     for reason, passed, calls in plan:
         attempt = create_attempt(
@@ -374,13 +381,16 @@ def test_attempt_outcomes_and_reasoning_share(db: sqlite3.Connection, repo_id: s
         "output_truncated": 2,
         "patch_missing": 1,
         "patch_does_not_apply": 1,
+        "patch_unknown_path": 1,
+        "patch_malformed": 2,
         "checks_failed": 1,
     }
     assert senior.reasoning_tokens == 4096 + 4000 + 100 + 300
     assert senior.reasoning_share == pytest.approx(8496 / (4096 + 4096 + 300 + 500 + 400))
     markdown = render_markdown(build_report(db, resamples=50))
     assert "### Attempt outcomes and reasoning" in markdown
-    assert "| senior | 2 | 1 | 1 | 1 | 8496 | 90% |" in markdown
+    assert "| senior | 2 | 1 | 1 | 1 | 2 | 1 | 8496 | 90% | 0 |" in markdown
+    assert "| `patch_unknown_path` | `patch_malformed` | `checks_failed` |" in markdown
 
 
 def test_reasoning_share_is_na_without_reports(db: sqlite3.Connection, repo_id: str) -> None:
@@ -388,3 +398,67 @@ def test_reasoning_share_is_na_without_reports(db: sqlite3.Connection, repo_id: 
     (middle,) = build_report(db, resamples=50).sections[0].strategies
     assert middle.reasoning_share is None and middle.reasoning_tokens == 0
     assert middle.failures == dict.fromkeys(FAILURE_KINDS, 0)
+
+
+@pytest.mark.parametrize(
+    ("summary", "count"),
+    [
+        ("prompt: 1 context file, nothing redacted", 0),
+        ("prompt: 2 context files, 1 item redacted (aws_access_key: 1)", 1),
+        ("prompt: 3 context files, 12 items redacted (generic: 10, jwt: 2)", 12),
+        ("patch: 1 file (line endings lf: 1)", 0),
+        (None, 0),
+    ],
+)
+def test_prompt_redactions_parse_the_summary(summary: str | None, count: int) -> None:
+    assert prompt_redactions(summary) == count
+
+
+def test_context_redactions_come_from_real_prompt_steps(
+    db: sqlite3.Connection, repo_id: str, tmp_path: Path
+) -> None:
+    # Written by the orchestrator's own helper, so a change to its summary fails here.
+    run = create_eval_run(
+        db,
+        strategy="senior",
+        split="tuning",
+        git_sha="x",
+        config_hash="h",
+        profile="micro",
+        repeats=1,
+        planned=1,
+        estimate_usd=1.0,
+    )
+    task = create_task(db, repo_id, "a", "r", profile="micro", source="eval")
+    artifacts = ArtifactStore(tmp_path / "artifacts")
+    for counts in (Counter({"aws_access_key": 2, "generic": 1}), Counter(), Counter(jwt=1)):
+        attempt = create_attempt(
+            db,
+            task.id,
+            adapter="api",
+            model="tier1.x",
+            effort="low",
+            verification="light",
+            route_reason={},
+        )
+        _record_prompt(
+            db, artifacts, task_id=task.id, attempt_id=attempt.id, files=["a.py"], redactions=counts
+        )
+        set_failure_reason(db, attempt.id, "patch_does_not_apply")
+        set_attempt_status(db, attempt.id, "error")
+    add_eval_result(
+        db,
+        run.id,
+        "a",
+        status="failed",
+        task_id=task.id,
+        cost_usd=0.0,
+        attempts=3,
+        duration_s=1.0,
+        escalations=2,
+        repeat_index=0,
+    )
+    finish_eval_run(db, run.id, "completed")
+    (senior,) = build_report(db, resamples=10).sections[0].strategies
+    assert senior.redactions == 4
+    assert senior.failures["patch_does_not_apply"] == 3

@@ -639,10 +639,13 @@ def report_command(
                 f"${m.counterfactual_usd:.4f}",
             )
         out.print(table)
-        outcomes = Table("strategy", *FAILURE_KINDS, "reasoning share", title="attempt outcomes")
+        outcomes = Table(
+            "strategy", *FAILURE_KINDS, "reasoning share", "redactions", title="attempt outcomes"
+        )
         for m in section.strategies:
             share = "n/a" if m.reasoning_share is None else f"{m.reasoning_share:.0%}"
-            outcomes.add_row(m.strategy, *(str(m.failures[k]) for k in FAILURE_KINDS), share)
+            counts = (str(m.failures[k]) for k in FAILURE_KINDS)
+            outcomes.add_row(m.strategy, *counts, share, str(m.redactions))
         out.print(outcomes)
         for p in section.paired:
             data = asdict(p)

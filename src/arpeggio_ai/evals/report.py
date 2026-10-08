@@ -12,12 +12,15 @@ section every strategy gets:
 - share of cost that was estimated rather than reported, model-mismatch count,
 - counterfactual cost and savings against it (CST-05),
 - attempt outcomes (``FAILURE_KINDS``): attempts per ``failure_reason`` among
-  ``output_truncated``, ``patch_missing`` and ``patch_does_not_apply``, and
-  ``checks_failed`` (a completed attempt with a failing verdict). Counted per attempt, so
-  an escalated task run can add several,
+  ``output_truncated``, ``patch_missing``, ``patch_does_not_apply``,
+  ``patch_unknown_path`` and ``patch_malformed`` (M0.7), and ``checks_failed`` (a
+  completed attempt with a failing verdict). Counted per attempt, so an escalated task run
+  can add several,
 - reasoning share: reasoning tokens over the output tokens of the model calls that report
   reasoning tokens (``n/a`` if none does). Calls that do not report them are left out of
-  both sides rather than counted as zero reasoning.
+  both sides rather than counted as zero reasoning,
+- context redactions: secret-scan findings redacted from the prompts of patch attempts,
+  read from each prompt step's summary (``PROMPT_REDACTIONS``). A metric only.
 
 **Statistics.** Bootstrap over tasks: tasks are resampled with replacement and a task's
 repeats stay together. ``RESAMPLES`` resamples from ``random.Random(seed)``, 95% percentile
@@ -33,6 +36,7 @@ Groups under ``MIN_GROUP`` tasks are "indicative only".
 """
 
 import random
+import re
 import sqlite3
 from collections import defaultdict
 from collections.abc import Callable, Iterable, Sequence
@@ -47,7 +51,16 @@ DEFAULT_SEED = 20261008
 MIN_TASKS = 10
 MIN_GROUP = 5
 UNRELIABLE_DROP_SHARE = 0.05
-FAILURE_KINDS = ("output_truncated", "patch_missing", "patch_does_not_apply", "checks_failed")
+FAILURE_KINDS = (
+    "output_truncated",
+    "patch_missing",
+    "patch_does_not_apply",
+    "patch_unknown_path",
+    "patch_malformed",
+    "checks_failed",
+)
+# The redaction count in the summary of a patch attempt's prompt step (orchestrator.attempts).
+PROMPT_REDACTIONS = re.compile(r"^prompt: \d+ context files?, (\d+) items? redacted\b")
 SPLIT_LABELS = {
     "holdout": "headline (holdout)",
     "tuning": "tuning: not for claims",
@@ -76,6 +89,7 @@ class TaskRun:
     failures: dict[str, int] = field(default_factory=dict)  # FAILURE_KINDS -> attempts
     reasoning_tokens: int = 0
     reasoning_output_tokens: int = 0  # output tokens of calls that report reasoning tokens
+    redactions: int = 0  # secret-scan redactions in the prompts of its patch attempts
 
 
 @dataclass(frozen=True, slots=True)
@@ -113,6 +127,7 @@ class StrategyMetrics:
     failures: dict[str, int]  # FAILURE_KINDS -> attempts, in that order
     reasoning_tokens: int
     reasoning_share: float | None
+    redactions: int  # secret-scan redactions in patch-attempt prompts (a metric only)
 
 
 @dataclass(frozen=True, slots=True)
@@ -191,8 +206,17 @@ def _task_facts(conn: sqlite3.Connection, task_id: str) -> tuple[float, int, str
     return float(row[0]), int(row[1]), str(task[0] or "other"), str(task[1] or "unknown")
 
 
-def _attempt_facts(conn: sqlite3.Connection, task_id: str) -> tuple[dict[str, int], int, int]:
-    """(attempts per FAILURE_KINDS, reasoning tokens, output tokens of reporting calls)."""
+def prompt_redactions(summary: str | None) -> int:
+    """The redaction count of a prompt step's summary; 0 for ``nothing redacted``."""
+    match = PROMPT_REDACTIONS.match(summary or "")
+    return int(match.group(1)) if match else 0
+
+
+def _attempt_facts(
+    conn: sqlite3.Connection, task_id: str
+) -> tuple[dict[str, int], int, int, int]:
+    """(attempts per FAILURE_KINDS, reasoning tokens, output tokens of reporting calls,
+    secret-scan redactions in the prompts)."""
     failures = dict.fromkeys(FAILURE_KINDS, 0)
     for (reason,) in conn.execute(
         "SELECT CASE WHEN a.failure_reason IS NOT NULL THEN a.failure_reason"
@@ -209,7 +233,15 @@ def _attempt_facts(conn: sqlite3.Connection, task_id: str) -> tuple[dict[str, in
         " WHERE a.task_id = ? AND s.reasoning_tokens IS NOT NULL",
         (task_id,),
     ).fetchone()
-    return failures, int(row[0]), int(row[1])
+    redactions = sum(
+        prompt_redactions(summary)
+        for (summary,) in conn.execute(
+            "SELECT s.summary FROM steps s JOIN attempts a ON a.id = s.attempt_id"
+            " WHERE a.task_id = ? AND s.kind = 'message' AND s.summary LIKE 'prompt: %'",
+            (task_id,),
+        )
+    )
+    return failures, int(row[0]), int(row[1]), redactions
 
 
 def load_task_runs(
@@ -222,7 +254,7 @@ def load_task_runs(
             skipped.append({"task": result.eval_task, "reason": result.status_reason or ""})
             continue
         estimated, mismatches, category, risk = _task_facts(conn, result.task_id)
-        failures, reasoning, reasoning_output = _attempt_facts(conn, result.task_id)
+        failures, reasoning, reasoning_output, redactions = _attempt_facts(conn, result.task_id)
         rows.append(
             TaskRun(
                 eval_task=result.eval_task,
@@ -244,6 +276,7 @@ def load_task_runs(
                 failures=failures,
                 reasoning_tokens=reasoning,
                 reasoning_output_tokens=reasoning_output,
+                redactions=redactions,
             )
         )
     return rows, skipped
@@ -375,6 +408,7 @@ def strategy_metrics(
         failures={kind: sum(r.failures.get(kind, 0) for r in rows) for kind in FAILURE_KINDS},
         reasoning_tokens=reasoning,
         reasoning_share=_ratio(reasoning, sum(r.reasoning_output_tokens for r in rows)),
+        redactions=sum(r.redactions for r in rows),
     )
 
 
@@ -560,16 +594,18 @@ def render_markdown(report: Report) -> str:
             "### Attempt outcomes and reasoning",
             "",
             "Attempts, not task runs: an escalated task run counts once per attempt. Reasoning"
-            " share is over the output tokens of model calls that report reasoning tokens.",
+            " share is over the output tokens of model calls that report reasoning tokens."
+            " Context redactions count secret-scan findings in the prompts (a metric only).",
             "",
             "| Strategy | " + " | ".join(f"`{kind}`" for kind in FAILURE_KINDS)
-            + " | Reasoning tokens | Reasoning share |",
-            "|---|" + "---|" * (len(FAILURE_KINDS) + 2),
+            + " | Reasoning tokens | Reasoning share | Context redactions |",
+            "|---|" + "---|" * (len(FAILURE_KINDS) + 3),
         ]
         for m in section.strategies:
             counts = " | ".join(str(m.failures[kind]) for kind in FAILURE_KINDS)
             lines.append(
                 f"| {m.strategy} | {counts} | {m.reasoning_tokens} | {_pct(m.reasoning_share)} |"
+                f" {m.redactions} |"
             )
         partial = [(m.strategy, r) for m in section.strategies for r in m.partial_reasons]
         for strategy, reason in partial:
