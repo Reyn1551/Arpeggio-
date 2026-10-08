@@ -14,6 +14,7 @@ from gitrepo import FILES, FIX, WRONG_FIX, make_repo, run_git, snapshot
 from arpeggio_ai.adapters.base import Route
 from arpeggio_ai.config.models import Config
 from arpeggio_ai.core.logs import configure_logging
+from arpeggio_ai.evals.task import EvalTask
 from arpeggio_ai.orchestrator.attempts import (
     PatchAttemptOutcome,
     overhead_history,
@@ -453,3 +454,29 @@ def test_patch_copying_a_placeholder_fails_the_attempt(home: Path, tmp_path: Pat
         assert run_git(worktree, "status", "--porcelain") == ""
     finally:
         harness.conn.close()
+
+
+def test_hidden_tests_of_an_eval_task_never_reach_the_prompt(e2e: E2E) -> None:
+    eval_task = EvalTask.model_validate(
+        {
+            "id": "calc-add",
+            "category": "bugfix",
+            "expected_risk": "low",
+            "repo": {"path": str(e2e.repo), "base": "abcd123", "solution": "abcd124"},
+            "request": "Make calc.add add.",
+            "done_criteria": [{"kind": "command", "argv": ["python", "-V"]}],
+            "hidden_tests": [{"path": "tests/test_calc.py", "source": "fixtures/x/test_calc.py"}],
+        }
+    )
+    provider = FakeProvider(ok(FIX), ok(FIX))
+    # Asked for as context (in another case, too): refused before it is read.
+    e2e.run(provider, context_files=["src/calc/ops.py", "TESTS/test_calc.py"], eval_task=eval_task)
+    e2e.run(provider, context_files=["tests/test_calc.py"], eval_task=eval_task)
+    for body in provider.bodies():
+        user = body["messages"][1]["content"]
+        assert "assert add(2, 3) == 5" not in user
+        assert "File `tests/test_calc.py`" not in user
+        assert "File `TESTS/test_calc.py`" not in user
+    assert "File `src/calc/ops.py`" in provider.bodies()[0]["messages"][1]["content"]
+    refused = [e for e in e2e.log_events() if e.get("event") == "patch.context_refused_hidden_test"]
+    assert len(refused) == 2
