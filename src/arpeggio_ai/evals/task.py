@@ -207,9 +207,7 @@ def inside(root: Path, relative: str) -> Path | None:
     return target if target.is_relative_to(root.resolve()) else None
 
 
-def load_task(
-    file: Path, evals_root: Path, variables: Mapping[str, str] | None = None
-) -> EvalTask:
+def load_task(file: Path, evals_root: Path, variables: Mapping[str, str] | None = None) -> EvalTask:
     """Read, validate and check one task file. Raises TaskError with every problem."""
     try:
         data = yaml.safe_load(file.read_text(encoding="utf-8"))
