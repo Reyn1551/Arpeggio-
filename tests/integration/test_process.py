@@ -9,6 +9,7 @@ from pathlib import Path
 
 import pytest
 
+from arpeggio_ai.safety import process as process_module
 from arpeggio_ai.safety.process import ProcessError, ProcessResult, run_process, scrubbed_env
 
 PY = sys.executable
@@ -147,3 +148,29 @@ def test_environment_is_scrubbed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 def test_posix_child_runs_in_its_own_process_group(tmp_path: Path) -> None:
     result = run([PY, "-c", "import os; print(os.getpgid(0) == os.getpid())"], tmp_path)
     assert result.text().strip() == "True"
+
+
+def test_output_over_the_cap_keeps_the_tail(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(process_module, "MAX_OUTPUT_BYTES", 1000)
+    script = "import sys; sys.stdout.write('a' * 5000 + 'END')"
+    result = run([PY, "-c", script], tmp_path)
+    assert result.output.startswith(
+        b"[arpeggio: output truncated, kept the last 1000 of 5003 bytes]\n"
+    )
+    assert result.output.endswith(b"a" * 997 + b"END")
+    assert (
+        len(result.output)
+        == len(b"[arpeggio: output truncated, kept the last 1000 of 5003 bytes]\n") + 1000
+    )
+
+
+def test_output_at_the_cap_is_kept_whole(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(process_module, "MAX_OUTPUT_BYTES", 1000)
+    result = run([PY, "-c", "import sys; sys.stdout.write('b' * 1000)"], tmp_path)
+    assert result.output == b"b" * 1000
+
+
+def test_default_cap_is_10_mb() -> None:
+    assert process_module.MAX_OUTPUT_BYTES == 10 * 1024 * 1024
