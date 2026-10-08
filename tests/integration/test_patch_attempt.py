@@ -170,6 +170,7 @@ def test_prompt_carries_task_checks_context_and_system_message(e2e: E2E) -> None
     assert user["content"].startswith("Task:\nMake calc.add add.")
     assert "tests/test_calc.py` exits with code 0." in user["content"]
     assert "File `src/calc/ops.py`:\n````\ndef add(a, b):\n    return a - b" in user["content"]
+    assert "Files you may modify, with these exact paths:\n- src/calc/ops.py\n" in user["content"]
     assert body["max_tokens"] == 256
 
 
@@ -212,6 +213,11 @@ def test_model_claiming_success_without_a_diff_is_not_believed(e2e: E2E) -> None
             "```diff\n--- a/src/calc/ops.py\n+++ b/src/calc/ops.py\n@@ -1,2 +1,2 @@\n"
             " def add(x, y):\n-    return x - y\n+    return x + y\n```",
             "patch_does_not_apply",
+        ),
+        (
+            "```diff\n--- a/src/calc/invented.py\n+++ b/src/calc/invented.py\n@@ -1 +1 @@\n"
+            "-a\n+b\n```",
+            "patch_unknown_path",
         ),
     ],
 )

@@ -183,7 +183,11 @@ def test_build_prompt() -> None:
     assert prompt.startswith("Task:\nFix add.\n\nChecks that must pass")
     assert "1. The command `pytest` exits with code 0." in prompt
     assert "File `src/calc/ops.py`:\n````\ndef add(a, b):" in prompt
+    assert "Files you may modify, with these exact paths:\n- src/calc/ops.py\n" in prompt
+    assert "Modify only these files. Create a new file only when the task needs one." in prompt
+    assert prompt.index("Files you may modify") < prompt.index("File `src/calc/ops.py`")
     assert "Files from the repository" not in build_prompt("x", [], [])
+    assert "Files you may modify" not in build_prompt("x", [], [])
     assert "Previous attempt" not in prompt
 
 

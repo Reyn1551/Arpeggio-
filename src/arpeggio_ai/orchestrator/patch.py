@@ -13,6 +13,9 @@ Hunk counts are recounted from the hunk bodies (M0.7) when the reply ended with
 ``finish_reason`` ``stop``: models often get the ``@@`` counts wrong while the lines are
 right. A truncated reply is never recounted, so a cut-off diff still fails as
 ``output_truncated``. A line inside a hunk that is not a diff line is ``patch_malformed``.
+The prompt lists the exact context paths as the only files to modify, and a diff that
+modifies, deletes or renames a path missing from the worktree's base commit (``git
+ls-files`` in the attempt worktree, compared exactly) is ``patch_unknown_path``.
 
 Line endings are normalized per file before ``git apply`` (EXE-08). Each modified or
 deleted file is classified from the worktree: ``crlf`` when at least 95% of its line breaks
@@ -56,6 +59,7 @@ FailureReason = Literal[
     "patch_line_endings_changed",
     "patch_writes_redacted_placeholder",
     "patch_malformed",
+    "patch_unknown_path",
     "output_truncated",
 ]
 # Patch failures a reply cut off at the output limit explains (M0.6.1).
@@ -377,6 +381,13 @@ def redacted_added_lines(parsed: ParsedDiff) -> list[tuple[str, int]]:
     return found
 
 
+def unknown_paths(parsed: ParsedDiff, tracked: Collection[str]) -> list[str]:
+    """Paths the diff modifies, deletes or renames from that are not in ``tracked`` (the
+    files of the base commit). A new file (``/dev/null`` or ``new file mode``) is never
+    unknown. Compared exactly, so a wrong case is unknown on Windows too."""
+    return sorted({s.old for s in parsed.sections if s.old is not None and s.old not in tracked})
+
+
 def redacted_hunk_paths(parsed: ParsedDiff) -> list[str]:
     """Files whose hunk context or removed lines hold a ``[REDACTED:`` marker."""
     paths: set[str] = set()
@@ -530,6 +541,15 @@ async def apply_patch(
         if recounted:
             log.info("patch.hunks_recounted", extra={"hunks": recounted})
             declared = set(validate_patch(diff, worktree))
+    tracked = await git(["ls-files", "-z"], cwd=worktree, env=env, home=home)
+    if tracked.exit_code != 0:
+        raise PatchError("patch_does_not_apply", f"git ls-files failed: {tracked.text().strip()}")
+    unknown = unknown_paths(parse_diff(diff), set(tracked.text().split("\0")))
+    if unknown:
+        raise PatchError(
+            "patch_unknown_path",
+            f"modifies paths not in the base commit and not created by the diff: {unknown}",
+        )
     redacted = redacted_hunk_paths(parse_diff(diff))
     if redacted:
         # Context was redacted before it reached the model, so these hunks may not match.
@@ -640,10 +660,16 @@ def build_prompt(
     feedback: str | None = None,
 ) -> str:
     """The user message: the task, the checks that judge it, the context files and, for an
-    escalated attempt, the previous attempt's failure report (VER-03)."""
+    escalated attempt, the previous attempt's failure report (VER-03). The exact context
+    paths are listed as the only files the diff may modify (M0.7)."""
     parts = [f"Task:\n{request.strip()}", "Checks that must pass after your diff is applied:"]
     parts.append("\n".join(f"{n}. {check}" for n, check in enumerate(checks, start=1)))
     if context:
+        listing = "\n".join(f"- {path}" for path, _ in context)
+        parts.append(
+            f"Files you may modify, with these exact paths:\n{listing}\n"
+            "Modify only these files. Create a new file only when the task needs one."
+        )
         parts.append("Files from the repository (paths relative to the root):")
         for path, text in context:
             parts.append(f"File `{path}`:\n````\n{text}\n````")
