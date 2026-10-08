@@ -11,7 +11,7 @@ guard estimates its size, so requests and their artifacts carry only redacted te
 Only ``message.content`` is the answer. Reasoning fields (``reasoning_content`` and the like)
 stay in the artifact and are never returned as the reply. Each model call records its
 ``finish_reason`` and reported reasoning tokens, and the result says whether the last reply
-stopped at the output limit (``TRUNCATED_FINISH_REASONS``).
+stopped at the output limit (``TRUNCATED_FINISH_REASONS``) and carries its ``finish_reason``.
 
 See ADR-0007 and docs/05-ROUTING-AND-COST.md for the rules this implements.
 """
@@ -65,9 +65,21 @@ TRUNCATED_FINISH_REASONS = frozenset({"length", "max_tokens"})
 class _Finished(Exception):
     """Ends the run with a result. Internal to this module."""
 
-    def __init__(self, status: AttemptStatus, message: str, *, truncated: bool = False) -> None:
+    def __init__(
+        self,
+        status: AttemptStatus,
+        message: str,
+        *,
+        truncated: bool = False,
+        finish_reason: str | None = None,
+    ) -> None:
         super().__init__(message)
-        self.result = AttemptResult(status=status, final_message=message, truncated=truncated)
+        self.result = AttemptResult(
+            status=status,
+            final_message=message,
+            truncated=truncated,
+            finish_reason=finish_reason,
+        )
 
 
 def _summary(text: str) -> str:
@@ -172,6 +184,7 @@ class _Outcome:
     event: StepEvent | None = None
     reply: str | None = None
     truncated: bool = False  # the reply stopped at the output limit
+    finish_reason: str | None = None  # as the provider said
     status: int | None = None
     failure: str | None = None  # why to retry, for example "HTTP 503"
     fatal: str | None = None  # ends the attempt with fatal_status
@@ -248,6 +261,7 @@ class ApiAdapter:
             messages.append(Message("system", scanner.redact(spec.system, "message:system")))
         reply = ""
         truncated = False
+        finish_reason: str | None = None
         sent = 0
         async with httpx.AsyncClient(transport=self._context.transport, timeout=timeout) as client:
             for index, turn in enumerate([spec.prompt, *spec.follow_ups]):
@@ -291,6 +305,7 @@ class ApiAdapter:
                     if outcome.reply is not None:
                         reply = outcome.reply
                         truncated = outcome.truncated
+                        finish_reason = outcome.finish_reason
                         source = f"message:assistant:{index}"
                         messages.append(Message("assistant", scanner.redact(reply, source)))
                         break
@@ -308,7 +323,7 @@ class ApiAdapter:
                     await self._context.sleep(delay)
                     retries += 1
                     last_failure = outcome.failure
-        raise _Finished("completed", reply, truncated=truncated)
+        raise _Finished("completed", reply, truncated=truncated, finish_reason=finish_reason)
 
     def _check_route(self, spec: AttemptSpec, model: ModelSpec, provider: Provider) -> None:
         if provider.kind != "openai_compatible":
@@ -426,10 +441,17 @@ class ApiAdapter:
             if content is None:
                 fatal = f"provider {model.provider} returned a response Arpeggio cannot read"
                 return _Outcome(event=event, status=status, fatal=fatal)
-            truncated = _finish_reason(data) in TRUNCATED_FINISH_REASONS
+            finish_reason = _finish_reason(data)
+            truncated = finish_reason in TRUNCATED_FINISH_REASONS
             if truncated:
                 log.warning("adapter.output_truncated", extra={"provider": model.provider})
-            return _Outcome(event=event, reply=content, truncated=truncated, status=status)
+            return _Outcome(
+                event=event,
+                reply=content,
+                truncated=truncated,
+                finish_reason=finish_reason,
+                status=status,
+            )
 
         # Errors are billed only when the provider reports usage for them.
         billed: StepEvent | None = None

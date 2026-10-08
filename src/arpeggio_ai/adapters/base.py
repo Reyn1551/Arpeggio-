@@ -88,6 +88,7 @@ class AttemptResult:
     final_message: str
     changed_files: list[str] = field(default_factory=list)
     truncated: bool = False  # the last reply stopped at the output limit
+    finish_reason: str | None = None  # the last reply's finish_reason, as the provider said
 
 
 async def _sleep(seconds: float) -> None:

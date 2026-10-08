@@ -972,7 +972,7 @@ def test_guard_sizes_the_redacted_prompt(harness: Harness, monkeypatch: pytest.M
 
 
 def thinking(
-    content: str | None, finish: str = "length", reasoning: str = "", tokens: Any = 4000
+    content: str | None, finish: str | None = "length", reasoning: str = "", tokens: Any = 4000
 ) -> httpx.Response:
     """A forced-thinking reply: reasoning in reasoning_content, the answer in content."""
     usage = deepseek_usage(completion=4096)
@@ -990,7 +990,7 @@ def thinking(
 def test_length_finish_is_recorded_and_marks_the_result_truncated(harness: Harness) -> None:
     run = harness.run(FakeProvider(thinking(None, reasoning="thinking...")))
     assert (run.result.status, run.result.final_message) == ("completed", "")
-    assert run.result.truncated is True
+    assert (run.result.truncated, run.result.finish_reason) == (True, "length")
     [step] = run.steps
     assert (step.finish_reason, step.reasoning_tokens, step.output_tokens) == ("length", 4000, 4096)
     assert step.summary == "(empty reply)"
@@ -1003,8 +1003,13 @@ def test_truncated_finish_reasons(harness: Harness, finish: str) -> None:
 
 def test_stop_finish_is_not_truncated(harness: Harness) -> None:
     run = harness.run(FakeProvider(ok("Hi")))
-    assert run.result.truncated is False
+    assert (run.result.truncated, run.result.finish_reason) == (False, "stop")
     assert (run.steps[0].finish_reason, run.steps[0].reasoning_tokens) == ("stop", None)
+
+
+def test_missing_finish_reason_is_none_on_the_result(harness: Harness) -> None:
+    run = harness.run(FakeProvider(thinking("x", None)))
+    assert (run.result.truncated, run.result.finish_reason) == (False, None)
 
 
 def test_reasoning_content_is_never_the_reply(harness: Harness) -> None:
@@ -1021,5 +1026,5 @@ def test_unusable_reasoning_counts_are_not_recorded(harness: Harness, tokens: An
 
 def test_only_the_last_turn_decides_truncation(harness: Harness) -> None:
     run = harness.run(FakeProvider(thinking("one"), ok("two")), follow_ups=["again"])
-    assert run.result.truncated is False
+    assert (run.result.truncated, run.result.finish_reason) == (False, "stop")
     assert [step.finish_reason for step in run.steps] == ["length", "stop"]
