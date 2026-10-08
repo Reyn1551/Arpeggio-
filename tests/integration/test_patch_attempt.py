@@ -558,3 +558,66 @@ def test_truncation_does_not_hide_an_unsafe_patch(e2e: E2E) -> None:
     reply = "```diff\n--- a/../x.py\n+++ b/../x.py\n@@ -1 +1 @@\n-a\n+b\n```"
     outcome = e2e.run(FakeProvider(cut(reply)))
     assert outcome.failure_reason == "patch_unsafe"
+
+
+# Hunk recount (M0.7)
+
+MISCOUNTED_FIX = FIX.replace("@@ -1,2 +1,2 @@", "@@ -1,3 +1,4 @@")
+
+
+def test_wrong_hunk_counts_with_correct_content_apply(e2e: E2E) -> None:
+    outcome = e2e.run(FakeProvider(ok(f"Fixed.\n\n{MISCOUNTED_FIX}\n")))
+    assert (outcome.attempt_status, outcome.task_status, outcome.failure_reason) == (
+        "completed",
+        "awaiting_review",
+        None,
+    )
+    attempt = e2e.attempt(outcome)
+    raw = e2e.artifacts.read(f"{e2e.task.id}/{attempt.id}/patch-raw.diff").decode("utf-8")
+    applied = e2e.artifacts.read(f"{e2e.task.id}/{attempt.id}/patch.diff").decode("utf-8")
+    assert "@@ -1,3 +1,4 @@" in raw
+    assert "@@ -1,2 +1,2 @@" in applied and "@@ -1,3 +1,4 @@" not in applied
+    assert len(raw.splitlines()) == len(applied.splitlines())
+    [event] = [e for e in e2e.log_events() if e.get("event") == "patch.hunks_recounted"]
+    assert event["hunks"] == 1
+    assert "return" not in json.dumps(event)  # a count, never content
+
+
+def test_a_correct_diff_is_not_reported_as_recounted(e2e: E2E) -> None:
+    outcome = e2e.run(FakeProvider(ok(FIX)))
+    assert outcome.task_status == "awaiting_review"
+    assert not [e for e in e2e.log_events() if e.get("event") == "patch.hunks_recounted"]
+
+
+def test_wrong_hunk_counts_in_a_truncated_reply_are_not_recounted(e2e: E2E) -> None:
+    outcome = e2e.run(FakeProvider(cut(f"Fixed.\n\n{MISCOUNTED_FIX}\n")))
+    assert (outcome.attempt_status, outcome.failure_reason) == ("error", "output_truncated")
+    failure = e2e.steps(outcome)[-1]
+    assert failure.summary is not None
+    assert failure.summary.startswith("output_truncated: patch_does_not_apply: ")
+    attempt = e2e.attempt(outcome)
+    applied = e2e.artifacts.read(f"{e2e.task.id}/{attempt.id}/patch.diff").decode("utf-8")
+    assert "@@ -1,3 +1,4 @@" in applied
+    assert not [e for e in e2e.log_events() if e.get("event") == "patch.hunks_recounted"]
+    assert_unchanged_worktree(e2e, outcome)
+
+
+def test_a_reply_without_finish_reason_is_not_recounted(e2e: E2E) -> None:
+    response = ok(MISCOUNTED_FIX)
+    body = response.json()
+    del body["choices"][0]["finish_reason"]
+    outcome = e2e.run(FakeProvider(type(response)(200, json=body)))
+    assert outcome.failure_reason == "patch_does_not_apply"
+
+
+def test_a_body_line_that_is_not_a_diff_line_is_still_rejected(e2e: E2E) -> None:
+    reply = MISCOUNTED_FIX.replace("-    return a - b", "*    return a - b")
+    outcome = e2e.run(FakeProvider(ok(reply)))
+    assert (outcome.attempt_status, outcome.failure_reason) == ("error", "patch_malformed")
+    assert_unchanged_worktree(e2e, outcome)
+
+
+def test_unsafe_paths_are_still_rejected_with_wrong_counts(e2e: E2E) -> None:
+    reply = "```diff\n--- a/../x.py\n+++ b/../x.py\n@@ -1,4 +1,7 @@\n-a\n+b\n```"
+    outcome = e2e.run(FakeProvider(ok(reply)))
+    assert outcome.failure_reason == "patch_unsafe"

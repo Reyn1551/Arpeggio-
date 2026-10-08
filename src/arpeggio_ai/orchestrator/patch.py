@@ -9,6 +9,11 @@ redacted context (``patch_writes_redacted_placeholder``). ``git apply --check`` 
 paths the diff declared, and the result is committed on the attempt branch as
 ``Arpeggio <arpeggio@localhost>``.
 
+Hunk counts are recounted from the hunk bodies (M0.7) when the reply ended with
+``finish_reason`` ``stop``: models often get the ``@@`` counts wrong while the lines are
+right. A truncated reply is never recounted, so a cut-off diff still fails as
+``output_truncated``. A line inside a hunk that is not a diff line is ``patch_malformed``.
+
 Line endings are normalized per file before ``git apply`` (EXE-08). Each modified or
 deleted file is classified from the worktree: ``crlf`` when at least 95% of its line breaks
 are CRLF, ``lf`` when at least 95% are a bare LF, else ``mixed``. A new file is ``crlf``
@@ -50,6 +55,7 @@ FailureReason = Literal[
     "patch_mixed_line_endings",
     "patch_line_endings_changed",
     "patch_writes_redacted_placeholder",
+    "patch_malformed",
     "output_truncated",
 ]
 # Patch failures a reply cut off at the output limit explains (M0.6.1).
@@ -66,6 +72,7 @@ SECRET_PATTERNS = (".env*", "*.pem", "*.key", "id_*", "*credentials*", "secrets.
 _FENCE = re.compile(r"^ {0,3}(`{3,}|~{3,})[ \t]*([^\s`~]*)")
 _HUNK = re.compile(r"^@@ -\d+(?:,(\d+))? \+\d+(?:,(\d+))? @@")
 _HUNK_NEW_START = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)")
+_HUNK_FULL = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@(.*)$")
 _DIFF_GIT = re.compile(r"^diff --git a/(.+) b/(.+)$")
 _DRIVE = re.compile(r"^[A-Za-z]:")
 _SYMLINK_MODE = re.compile(r"^(new file|deleted file|old|new) mode 120000\s*$")
@@ -211,6 +218,65 @@ def validate_patch(diff: str, worktree: Path) -> list[str]:
             f"added lines contain a {REDACTION_MARKER}...] placeholder at {where}",
         )
     return sorted(declared)
+
+
+def recount_hunks(diff: str) -> tuple[str, int]:
+    """Rewrite each hunk's ``@@`` counts from its body. Returns the diff and the number of
+    hunks whose counts changed; a hunk whose counts are right keeps its header byte for byte.
+
+    A hunk body runs until the next ``@@``, ``diff --git`` or ``---``/``+++`` pair (a pair
+    still inside the declared counts is a removed and an added line, as in git) or the end.
+    Context and blank lines count on both sides, ``-`` on the old side, ``+`` on the new one.
+    Blank lines at the end of a hunk are kept but not counted. Any other line inside a hunk
+    is ``patch_malformed``, unless the counted lines already match the header, where git
+    ends the hunk too. No line is ever added or removed.
+    """
+    lines = diff.split("\n")
+    out = list(lines)
+    changed = 0
+    header: re.Match[str] | None = None
+    at = old = new = blanks = 0
+
+    def close() -> None:
+        nonlocal header, changed
+        if header is None:
+            return
+        old_start, old_count, new_start, new_count, rest = header.groups()
+        if (old, new) != (int(old_count or 1), int(new_count or 1)):
+            ending = "\r" if lines[at].endswith("\r") else ""
+            out[at] = f"@@ -{old_start},{old} +{new_start},{new} @@{rest}{ending}"
+            changed += 1
+        header = None
+
+    for number, raw in enumerate(lines):
+        line = raw.removesuffix("\r")
+        if header is not None:
+            declared_old, declared_new = int(header.group(2) or 1), int(header.group(4) or 1)
+            inside = old < declared_old and new < declared_new
+            pair = (
+                line.startswith("--- ")
+                and number + 1 < len(lines)
+                and lines[number + 1].startswith("+++ ")
+            )
+            if line.startswith(("@@ ", "diff --git ")) or (pair and not inside):
+                close()
+            elif line == "":
+                blanks += 1
+                continue
+            elif line[:1] in (" ", "-", "+", "\\"):
+                old += blanks + (line[:1] in (" ", "-"))
+                new += blanks + (line[:1] in (" ", "+"))
+                blanks = 0
+                continue
+            elif (old, new) == (declared_old, declared_new):
+                close()
+            else:
+                raise PatchError("patch_malformed", f"diff line {number + 1} is not a hunk line")
+        match = _HUNK_FULL.match(line)
+        if match:
+            header, at, old, new, blanks = match, number, 0, 0, 0
+    close()
+    return "\n".join(out), changed
 
 
 LineKind = Literal["header", "hunk", "context", "removed", "added", "no_newline"]
@@ -449,13 +515,21 @@ async def apply_patch(
     env: Mapping[str, str],
     home: Path,
     on_normalized: Callable[[LineEndingPlan], None] | None = None,
+    recount: bool = False,
 ) -> str:
     """Validate, normalize, apply and commit ``diff`` in ``worktree``. Returns the commit SHA.
 
-    ``on_normalized`` receives the diff that will be applied, before ``git apply`` runs, so
-    it can be stored whether or not it applies.
+    ``recount`` rewrites the hunk counts from their bodies (``recount_hunks``) after the raw
+    diff passed validation; the result is validated again. Only a complete reply
+    (``finish_reason`` ``stop``) is recounted. ``on_normalized`` receives the diff that will
+    be applied, before ``git apply`` runs, so it can be stored whether or not it applies.
     """
     declared = set(validate_patch(diff, worktree))
+    if recount:
+        diff, recounted = recount_hunks(diff)
+        if recounted:
+            log.info("patch.hunks_recounted", extra={"hunks": recounted})
+            declared = set(validate_patch(diff, worktree))
     redacted = redacted_hunk_paths(parse_diff(diff))
     if redacted:
         # Context was redacted before it reached the model, so these hunks may not match.

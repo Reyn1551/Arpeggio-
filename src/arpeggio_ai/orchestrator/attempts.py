@@ -89,7 +89,7 @@ class PrepareError(ArpeggioError):
 Prepare = Callable[[Path, str], Awaitable[None]]  # (worktree, attempt_id)
 
 RAW_PATCH_ARTIFACT = "patch-raw.diff"  # the diff as the model wrote it
-PATCH_ARTIFACT = "patch.diff"  # the diff after line-ending normalization, as applied
+PATCH_ARTIFACT = "patch.diff"  # after hunk recount and line-ending normalization, as applied
 
 
 def overhead_history(conn: sqlite3.Connection) -> Callable[[str, str], int]:
@@ -309,7 +309,8 @@ async def run_patch_attempt(
     - A patch that is missing, ambiguous, unsafe or does not apply: attempt ``error`` with
       ``failure_reason``, task ``failed``. If the reply stopped at the output limit, a
       missing patch or one that does not apply is ``output_truncated`` instead. A truncated
-      reply whose patch applies goes on to the checks as usual.
+      reply whose patch applies goes on to the checks as usual. Only a reply that ended
+      with ``finish_reason`` ``stop`` has its hunk counts recounted (``recount_hunks``).
     - Otherwise every criterion runs: all pass gives task ``awaiting_review``, any failure
       gives task ``failed``. The attempt is ``completed`` either way.
 
@@ -425,7 +426,13 @@ async def run_patch_attempt(
                 _record_patch(conn, artifacts, task_id=task_id, attempt_id=attempt.id, plan=plan)
 
             await apply_patch(
-                diff, tree.path, attempt_id=attempt.id, env=env, home=home, on_normalized=record
+                diff,
+                tree.path,
+                attempt_id=attempt.id,
+                env=env,
+                home=home,
+                on_normalized=record,
+                recount=result.finish_reason == "stop",
             )
         except PatchError as error:
             reason, detail = truncation_reason(error, result.truncated)
