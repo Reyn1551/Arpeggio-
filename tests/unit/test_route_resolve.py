@@ -156,9 +156,21 @@ PROVIDERS = {"open": "unknown", "safe": "no_training"}
             False,
             {"tier1.open", "tier3.safe"},
         ),
-        ({"privacy_class": "client"}, True, {"tier3.safe"}),  # global opt-in ignored
+        # client repos: only providers listed in provider_allow (docs/07)
+        ({"privacy_class": "client"}, None, set()),
+        ({"privacy_class": "client", "allow_training_providers": True}, None, set()),
+        ({"privacy_class": "client", "provider_allow": ["open", "safe"]}, None, {"tier3.safe"}),
+        (  # the global opt-in is ignored
+            {"privacy_class": "client", "provider_allow": ["open", "safe"]},
+            True,
+            {"tier3.safe"},
+        ),
         (
-            {"privacy_class": "client", "allow_training_providers": True},
+            {
+                "privacy_class": "client",
+                "provider_allow": ["open", "safe"],
+                "allow_training_providers": True,
+            },
             None,
             {"tier1.open", "tier3.safe"},
         ),
@@ -185,3 +197,4 @@ def test_no_allowed_route_explains_the_opt_in() -> None:
     with pytest.raises(NoAllowedRoute) as raised:
         require_allowed(client)
     assert "[privacy]" not in str(raised.value)
+    assert "provider_allow" in str(raised.value)

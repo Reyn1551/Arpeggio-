@@ -8,6 +8,7 @@ considered (``allowed_models``):
 2. SAF-07: a ``private`` or ``client`` repo uses only providers whose ``data_use`` is
    ``no_training``, unless the repo's effective opt-in allows the others
    (``Config.allows_training_providers``); ``[repo] provider_allow`` narrows it further,
+   and a ``client`` repo uses only providers it lists there (docs/07, Code privacy),
 3. the placeholder guard: a model whose id is still ``<...>`` is never used.
 
 ``tierN`` means every allowed model whose key starts with ``tierN.``. Every function here
@@ -47,6 +48,8 @@ def provider_allowed(config: Config, provider_name: str) -> bool:
     """SAF-07 for the repo behind ``config`` (the merged global and repo config)."""
     repo = config.repo
     if repo.provider_allow is not None and provider_name not in repo.provider_allow:
+        return False
+    if repo.privacy_class == "client" and repo.provider_allow is None:
         return False
     if repo.privacy_class == "public":
         return True
@@ -91,6 +94,8 @@ def why_none_allowed(config: Config) -> str:
                 )
                 + ', or mark a provider data_use = "no_training" after reading its terms'
             )
+    if repo.privacy_class == "client" and repo.provider_allow is None:
+        parts.append("a client repo uses only the providers listed in [repo] provider_allow")
     if placeholders:
         parts.append(f"placeholder model ids: {', '.join(sorted(placeholders))}")
     return "; ".join(parts)
