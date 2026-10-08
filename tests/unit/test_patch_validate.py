@@ -181,6 +181,13 @@ def test_build_prompt() -> None:
         [("src/calc/ops.py", "def add(a, b):\n    return a - b\n")],
     )
     assert prompt.startswith("Task:\nFix add.\n\nChecks that must pass")
-    assert "- The command `pytest` exits with code 0." in prompt
+    assert "1. The command `pytest` exits with code 0." in prompt
     assert "File `src/calc/ops.py`:\n````\ndef add(a, b):" in prompt
     assert "Files from the repository" not in build_prompt("x", [], [])
+    assert "Previous attempt" not in prompt
+
+
+def test_build_prompt_appends_feedback_last() -> None:
+    prompt = build_prompt("Fix add.", ["a", "b"], [], "Attempt 1 failed: checks_failed.")
+    assert "1. a\n2. b" in prompt
+    assert prompt.endswith("Previous attempt:\nAttempt 1 failed: checks_failed.\n")
