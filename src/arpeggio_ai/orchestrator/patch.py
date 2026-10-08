@@ -16,11 +16,13 @@ import logging
 import re
 import tempfile
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from importlib.resources import files
 from pathlib import Path
 from typing import Literal
 
 from arpeggio_ai.core.errors import ArpeggioError
+from arpeggio_ai.safety.secret_scan import MARKER as REDACTION_MARKER
 from arpeggio_ai.safety.worktree import git
 from arpeggio_ai.verify.criteria import relative_path_problem
 
@@ -167,6 +169,96 @@ def validate_patch(diff: str, worktree: Path) -> list[str]:
     return sorted(declared)
 
 
+LineKind = Literal["header", "hunk", "context", "removed", "added", "no_newline"]
+
+
+@dataclass(slots=True)
+class FileSection:
+    """One file's part of a diff. ``old`` is None for a new file, ``new`` for a deletion."""
+
+    old: str | None = None
+    new: str | None = None
+    has_old_header: bool = False
+    has_hunk: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class ParsedDiff:
+    lines: list[str]  # the diff split on "\n", each line without it
+    kinds: list[tuple[LineKind, int]]  # per line: its kind and its section index (-1: none)
+    sections: list[FileSection]
+
+
+def parse_diff(diff: str) -> ParsedDiff:
+    """Split a diff into file sections and classify every line (hunk counts as in git)."""
+    lines = diff.split("\n")
+    if lines and lines[-1] == "":
+        lines.pop()
+    kinds: list[tuple[LineKind, int]] = []
+    sections: list[FileSection] = []
+    old_left = new_left = 0
+    for raw in lines:
+        line = raw.rstrip("\r")
+        current = len(sections) - 1
+        if old_left > 0 or new_left > 0:
+            marker = line[:1]
+            kind: LineKind | None = None
+            if marker == " " or line == "":
+                kind, old_left, new_left = "context", old_left - 1, new_left - 1
+            elif marker == "-":
+                kind, old_left = "removed", old_left - 1
+            elif marker == "+":
+                kind, new_left = "added", new_left - 1
+            elif marker == "\\":
+                kind = "no_newline"
+            else:
+                old_left = new_left = 0  # malformed hunk: let git apply report it
+            if kind is not None:
+                kinds.append((kind, current))
+                continue
+        if line.startswith("\\") and kinds and kinds[-1][0] in ("context", "removed", "added"):
+            kinds.append(("no_newline", current))  # follows the last line of a hunk
+            continue
+        hunk = _HUNK.match(line)
+        if hunk and current >= 0:
+            old_left, new_left = int(hunk.group(1) or 1), int(hunk.group(2) or 1)
+            sections[current].has_hunk = True
+            kinds.append(("hunk", current))
+            continue
+        match = _DIFF_GIT.match(line)
+        if line.startswith("diff --git "):
+            sections.append(FileSection(*(match.groups() if match else (None, None))))
+        elif line.startswith("--- "):
+            section = sections[current] if current >= 0 else None
+            if section is None or section.has_hunk or section.has_old_header:
+                section = FileSection()
+                sections.append(section)
+            section.has_old_header = True
+            section.old = _header_path(line[4:])
+        elif line.startswith("+++ ") and current >= 0:
+            sections[current].new = _header_path(line[4:])
+        elif line.startswith("new file mode") and current >= 0:
+            sections[current].old = None
+        elif line.startswith("deleted file mode") and current >= 0:
+            sections[current].new = None
+        elif line.startswith("rename from ") and current >= 0:
+            sections[current].old = line[len("rename from ") :]
+        elif line.startswith("rename to ") and current >= 0:
+            sections[current].new = line[len("rename to ") :]
+        kinds.append(("header", len(sections) - 1))
+    return ParsedDiff(lines, kinds, sections)
+
+
+def redacted_hunk_paths(parsed: ParsedDiff) -> list[str]:
+    """Files whose hunk context or removed lines hold a ``[REDACTED:`` marker."""
+    paths: set[str] = set()
+    for line, (kind, index) in zip(parsed.lines, parsed.kinds, strict=True):
+        if kind in ("context", "removed") and REDACTION_MARKER in line and index >= 0:
+            section = parsed.sections[index]
+            paths.add(section.old or section.new or "?")
+    return sorted(paths)
+
+
 def _changed_paths(porcelain_z: str) -> set[str]:
     """Paths from ``git status --porcelain -z`` (both sides of a rename)."""
     entries = porcelain_z.split("\0")
@@ -190,6 +282,10 @@ async def apply_patch(
 ) -> str:
     """Validate, apply and commit ``diff`` in ``worktree``. Returns the new commit SHA."""
     declared = set(validate_patch(diff, worktree))
+    redacted = redacted_hunk_paths(parse_diff(diff))
+    if redacted:
+        # Context was redacted before it reached the model, so these hunks may not match.
+        log.warning("patch.touches_redacted_lines", extra={"paths": redacted})
     with tempfile.TemporaryDirectory(prefix="arpeggio-patch-") as scratch:
         patch_file = Path(scratch) / "attempt.diff"
         patch_file.write_bytes(diff.encode("utf-8"))

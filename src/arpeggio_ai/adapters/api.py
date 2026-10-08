@@ -42,7 +42,7 @@ from arpeggio_ai.cost.pricing import (
     normalize_usage,
     round_usd,
 )
-from arpeggio_ai.safety.secret_scan import scanner_from_config
+from arpeggio_ai.safety.secret_scan import SecretScanner, scanner_from_config
 from arpeggio_ai.store.repositories import AttemptStatus
 
 log = logging.getLogger(__name__)
@@ -161,6 +161,7 @@ class ApiAdapter:
         self._cancelled = False
         self._spent_usd = 0.0
         self._secret: str | None = None  # only to scrub provider echoes; never logged
+        self._scanner = SecretScanner()  # replaced per run with the config's scanner
         self._run_overhead = 0  # highest prompt overhead seen in this run
         self._overhead = 0  # effective overhead assumed for the request in flight
 
@@ -214,7 +215,7 @@ class ApiAdapter:
         timeout = httpx.Timeout(CONNECT_TIMEOUT_S, read=float(spec.timeout_s))
         # Every message is scanned before the guard sizes it and before a body is built, so
         # the request and its stored artifact only ever hold redacted text (SAF-02).
-        scanner = scanner_from_config(config, self._context.env)
+        scanner = self._scanner = scanner_from_config(config, self._context.env)
         messages = []
         if spec.system:
             messages.append(Message("system", scanner.redact(spec.system, "message:system")))
@@ -470,7 +471,9 @@ class ApiAdapter:
         if timed_out:
             summary = timed_out
         elif status == 200:
-            summary = _summary(_content(data) or "(empty reply)")
+            # Redacted before the cut, so the cut never keeps part of a secret.
+            text = _content(data) or "(empty reply)"
+            summary = _summary(self._scanner.scan(text, "step:summary").text)
         else:
             summary = f"HTTP {status} from {model.provider}"
         return StepEvent(

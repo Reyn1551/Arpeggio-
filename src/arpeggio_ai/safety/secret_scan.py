@@ -233,12 +233,16 @@ class SecretScanner:
         pieces.append(text[position:])
         return ScanResult("".join(pieces), tuple(findings))
 
-    def redact(self, text: str, source: str) -> str:
+    def scan_logged(self, text: str, source: str) -> ScanResult:
         """``scan`` and log ``secret_scan.redacted`` when anything was found."""
         result = self.scan(text, source)
         if result.findings:
             log.warning("secret_scan.redacted", extra=event_fields(result, source))
-        return result.text
+        return result
+
+    def redact(self, text: str, source: str) -> str:
+        """The redacted text of ``scan_logged``."""
+        return self.scan_logged(text, source).text
 
 
 def event_fields(result: ScanResult, source: str) -> dict[str, object]:
