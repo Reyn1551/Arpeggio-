@@ -6,7 +6,9 @@ import typer
 
 from arpeggio_ai import __version__
 from arpeggio_ai.cli.commands.config import app as config_app
+from arpeggio_ai.cli.commands.evals import app as eval_app
 from arpeggio_ai.cli.commands.init import init_command
+from arpeggio_ai.cli.commands.secrets import app as secrets_app
 from arpeggio_ai.cli.output import JSON_HELP, emit_json
 
 app = typer.Typer(
@@ -39,3 +41,5 @@ def main(
 
 app.command("init")(init_command)
 app.add_typer(config_app, name="config")
+app.add_typer(eval_app, name="eval")
+app.add_typer(secrets_app, name="secrets")

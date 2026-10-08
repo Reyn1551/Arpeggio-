@@ -289,3 +289,24 @@ def test_repo_opt_in_overrides_global(
     write_global(template_text + "\n[privacy]\nallow_training_providers = true\n")
     write_repo("[repo]\nallow_training_providers = false\n")
     assert load_config(repo_dir).allows_training_providers() is False
+
+
+def test_evals_table_is_global_only(
+    write_global: WriteFile,
+    write_repo: WriteFile,
+    template_text: str,
+    repo_dir: Path,
+    tmp_path: Path,
+) -> None:
+    target = (tmp_path / "my-evals").as_posix()
+    write_global(template_text + f'\n[evals]\ndir = "{target}"\n')
+    assert load_config().evals.dir == target
+    path = write_repo(f'[evals]\ndir = "{target}"\n')
+    issues = load_issues(repo_dir)
+    assert [(issue.file, issue.field) for issue in issues] == [(str(path), "evals")]
+
+
+def test_evals_dir_must_be_absolute(write_global: WriteFile, template_text: str) -> None:
+    write_global(template_text + '\n[evals]\ndir = "relative/evals"\n')
+    issues = load_issues(None)
+    assert [issue.field for issue in issues] == ["evals.dir"]

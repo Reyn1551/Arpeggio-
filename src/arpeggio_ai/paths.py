@@ -4,6 +4,7 @@ import os
 from pathlib import Path
 
 HOME_ENV_VAR = "ARPEGGIO_HOME"
+EVALS_ENV_VAR = "ARPEGGIO_EVALS_DIR"
 CONFIG_FILENAME = "config.toml"
 DB_FILENAME = "arpeggio.db"
 DOT_DIRNAME = ".arpeggio"
@@ -47,3 +48,13 @@ def logs_dir(home: Path | None = None) -> Path:
 def repo_config_path(repo: Path) -> Path:
     """Return ``<repo>/.arpeggio/config.toml`` as an absolute path."""
     return repo.expanduser().absolute() / DOT_DIRNAME / CONFIG_FILENAME
+
+
+def evals_dir(configured: str | None = None, home: Path | None = None) -> Path:
+    """The personal eval suite: ``$ARPEGGIO_EVALS_DIR``, else ``[evals] dir``, else
+    ``<home>/evals``. It lives outside the Arpeggio repo because its tasks come from private
+    repositories (EVL-01)."""
+    value = os.environ.get(EVALS_ENV_VAR, "").strip() or (configured or "").strip()
+    if value:
+        return Path(value).expanduser().absolute()
+    return (home if home is not None else arpeggio_home()) / "evals"

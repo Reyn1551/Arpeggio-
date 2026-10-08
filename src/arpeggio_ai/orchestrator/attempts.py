@@ -31,6 +31,8 @@ from arpeggio_ai.adapters.base import (
 from arpeggio_ai.core.errors import StoreError
 from arpeggio_ai.core.ids import new_id
 from arpeggio_ai.core.logs import log_context
+from arpeggio_ai.evals.hidden import hidden_paths
+from arpeggio_ai.evals.task import EvalTask
 from arpeggio_ai.orchestrator.patch import (
     LineEndingPlan,
     PatchError,
@@ -276,6 +278,7 @@ async def run_patch_attempt(
     timeout_s: int = 300,
     max_steps: int = 4,
     context_files: Sequence[str] = (),
+    eval_task: EvalTask | None = None,
 ) -> PatchAttemptOutcome:
     """Run one patch attempt end to end and set the attempt and task status.
 
@@ -288,7 +291,8 @@ async def run_patch_attempt(
       gives task ``failed``. The attempt is ``completed`` either way.
 
     The worktree is kept for inspection. ``max_steps`` covers the model call and its
-    retries.
+    retries. With ``eval_task`` attached, its hidden test paths are never read as context
+    and never named in the attempt spec.
     """
     task = get_task(conn, task_id)
     if task is None:
@@ -302,6 +306,8 @@ async def run_patch_attempt(
         log.warning("attempt.no_criteria", extra={"task_id": task_id})
         return PatchAttemptOutcome(None, None, "needs_user", "no_criteria", [])
 
+    hidden = hidden_paths(eval_task)
+    blocked = {path.casefold() for path in hidden}
     config = context.config
     env = scrubbed_env(extra=config.repo.check_env, deny=provider_key_names(config))
     model = config.models.get(route.model)
@@ -341,7 +347,7 @@ async def run_patch_attempt(
 
         checks = [describe_criterion(row.parsed()) for row in criteria]
         request, context_texts, redactions = _scan_prompt_parts(
-            scanner, task.request, read_context(tree.path, context_files)
+            scanner, task.request, read_context(tree.path, context_files, hidden=hidden)
         )
         _record_prompt(
             conn,
@@ -361,7 +367,7 @@ async def run_patch_attempt(
             max_steps=max_steps,
             max_tokens=max_tokens,
             worktree=str(tree.path),
-            context_files=list(context_files),
+            context_files=[path for path in context_files if path.casefold() not in blocked],
             system=system_prompt(),
         )
         adapter = registry.create(route.adapter, context)

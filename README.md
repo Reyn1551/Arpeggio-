@@ -66,6 +66,15 @@ The other profiles are `micro-deepseek` (a few dollars of DeepSeek credit), `sta
 
 `arpeggio init` writes to `~/.arpeggio/`, or to `$ARPEGGIO_HOME` when that variable is set. Running it again only adds what is missing and brings the database schema up to date. It never deletes data. Fill in `config.toml` (providers, model ids, prices), then run `arpeggio config validate`. Use `arpeggio config show` to print the merged result. Every command accepts `--json` and prints one JSON object for scripts.
 
+The eval suite tooling makes no model calls. Your personal suite lives outside this repo, in `~/.arpeggio/evals/` by default ([how to add a task](docs/06-EVALUATION.md#how-to-add-a-task)):
+
+```bash
+arpeggio eval new --repo ~/code/skriptif --base 3f2a9c1 --solution 9b81d07 --id skriptif-email-validation
+arpeggio eval check                  # self-check: checks fail at base and pass with the solution
+arpeggio eval list                   # tasks, latest status, holdout share
+arpeggio secrets scan ~/code/skriptif  # dry run of the secret scanner: file, line and type only
+```
+
 ### Planned
 
 These commands do not exist yet:

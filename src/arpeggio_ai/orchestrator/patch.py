@@ -27,7 +27,7 @@ import fnmatch
 import logging
 import re
 import tempfile
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass
 from importlib.resources import files
 from pathlib import Path
@@ -503,12 +503,24 @@ async def apply_patch(
 
 
 def read_context(
-    worktree: Path, paths: Sequence[str], cap_bytes: int = CONTEXT_CAP_BYTES
+    worktree: Path,
+    paths: Sequence[str],
+    cap_bytes: int = CONTEXT_CAP_BYTES,
+    *,
+    hidden: Collection[str] = (),
 ) -> list[tuple[str, str]]:
-    """Read context files from the worktree for the prompt, skipping unsafe or secret ones."""
+    """Read context files from the worktree for the prompt, skipping unsafe or secret ones.
+
+    A path in ``hidden`` (the hidden tests of an attached eval task) is refused before
+    anything is read, compared case-insensitively so Windows spellings cannot slip past.
+    """
+    blocked = {path.casefold() for path in hidden}
     chosen: list[tuple[str, str]] = []
     total = 0
     for path in paths:
+        if path.casefold() in blocked:
+            log.warning("patch.context_refused_hidden_test", extra={"path": path})
+            continue
         reason = _path_problem(path, worktree)
         name = path.rsplit("/", 1)[-1].lower()
         target = worktree / path

@@ -11,6 +11,7 @@ from pydantic import BaseModel
 from arpeggio_ai.config.loader import TEMPLATES, template_bytes
 from arpeggio_ai.config.models import (
     Budget,
+    EvalsSettings,
     ModelSpec,
     PricingWindows,
     PrivacySettings,
@@ -107,6 +108,7 @@ def reference_fields(heading: str) -> set[str]:
         ('[models."tier<N>.<name>"]', ModelSpec),
         ("[repo]", RepoSettings),
         ("[privacy]", PrivacySettings),
+        ("[evals]", EvalsSettings),
     ],
 )
 def test_config_reference_matches_the_models(heading: str, model: type[BaseModel]) -> None:

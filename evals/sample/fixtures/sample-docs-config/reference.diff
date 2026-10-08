@@ -1,0 +1,17 @@
+diff --git a/calc.toml b/calc.toml
+index 9c97b43..899a2eb 100644
+--- a/calc.toml
++++ b/calc.toml
+@@ -1,2 +1,2 @@
+ [calc]
+-precision = 0
++precision = 2
+diff --git a/docs/usage.md b/docs/usage.md
+new file mode 100644
+index 0000000..7e6eb83
+--- /dev/null
++++ b/docs/usage.md
+@@ -0,0 +1,3 @@
++# Usage
++
++`calc.ops.add(a, b)` and `calc.ops.mul(a, b)`.

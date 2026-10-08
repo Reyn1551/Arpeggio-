@@ -24,3 +24,6 @@ coverage.xml
 
 # Repo-local Arpeggio runtime dir
 .arpeggio/
+
+# Self-check reports of the sample eval suite
+evals/sample/.reports/

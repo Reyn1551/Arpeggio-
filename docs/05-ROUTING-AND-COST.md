@@ -330,6 +330,12 @@ The key is `tier1`, `tier2` or `tier3`, a dot, then lowercase letters, digits, `
 |---|---|---|
 | `allow_training_providers` | bool | Default `false`. The opt-in that `private` repos follow when their own `[repo]` value is unset. `client` repos ignore it (SAF-07) |
 
+### `[evals]` (only in the global config)
+
+| Field | Type | Rule |
+|---|---|---|
+| `dir` | string | Optional, an absolute path (`~` is expanded). Where the personal eval suite lives. Unset means `<ARPEGGIO_HOME>/evals`, and the `ARPEGGIO_EVALS_DIR` environment variable overrides both ([06](06-EVALUATION.md#where-the-suite-lives)) |
+
 ### `[repo]` (only in `<repo>/.arpeggio/config.toml`)
 
 | Field | Type | Rule |

@@ -134,9 +134,25 @@ def load_config(repo: Path | None = None) -> Config:
                         "Use allow_training_providers under [repo] instead.",
                     )
                 )
+            if repo_raw is not None and "evals" in repo_raw:
+                issues.append(
+                    ConfigIssue(
+                        file=str(repo_path),
+                        field="evals",
+                        message="[evals] is only allowed in the global config",
+                    )
+                )
 
     if issues or global_raw is None:
         raise ConfigError(issues)
     if repo_raw is None:
         return parse_config(global_raw, file=str(global_path))
     return parse_config(deep_merge(global_raw, repo_raw), file="merged")
+
+
+def load_config_if_present(repo: Path | None = None) -> Config | None:
+    """``load_config``, or None when there is no global config yet (commands that work
+    without one, such as ``eval`` and ``secrets scan``, fall back to defaults)."""
+    if not global_config_path().exists():
+        return None
+    return load_config(repo)
