@@ -1,0 +1,2 @@
+# Sample eval fixtures are compared byte for byte.
+evals/sample/fixtures/** -text

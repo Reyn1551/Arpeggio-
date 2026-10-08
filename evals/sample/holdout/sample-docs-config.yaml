@@ -1,0 +1,22 @@
+# Public sample task solved by a reference diff only (no solution commit).
+id: sample-docs-config
+category: config
+expected_risk: low
+repo:
+  path: "${SAMPLE_REPO}"
+  base: "${SAMPLE_C2}"
+request: >
+  Set the calculator precision in calc.toml to 2 and add docs/usage.md with a
+  short note on how to call add and mul.
+done_criteria:
+  - kind: file_exists
+    path: docs/usage.md
+  - kind: command
+    argv:
+      - "${PYTHON}"
+      - "-c"
+      - "import tomllib; assert tomllib.load(open('calc.toml', 'rb'))['calc']['precision'] == 2"
+    timeout_s: 60
+reference_diff: fixtures/sample-docs-config/reference.diff
+context_files: [calc.toml]
+tags: [docs, config, sample]

@@ -1,0 +1,24 @@
+# Public sample task with a hidden test (SWE-bench pattern): tests/test_mul.py comes from
+# the solution commit and is copied in only for verification.
+id: sample-feature-mul
+category: feature
+expected_risk: low
+repo:
+  path: "${SAMPLE_REPO}"
+  base: "${SAMPLE_C1}"
+  solution: "${SAMPLE_C2}"
+request: >
+  Add a function mul(a, b) to calc.ops that returns the product of its two
+  arguments. Keep add unchanged.
+done_criteria:
+  - kind: command
+    argv: ["${PYTHON}", "-m", "unittest", "discover", "-s", "tests", "-p", "test_mul.py"]
+    timeout_s: 120
+  - kind: command
+    argv: ["${PYTHON}", "-m", "unittest", "discover", "-s", "tests", "-p", "test_calc.py"]
+    timeout_s: 120
+hidden_tests:
+  - path: tests/test_mul.py
+    source: fixtures/sample-feature-mul/hidden/tests/test_mul.py
+context_files: [src/calc/ops.py]
+tags: [python, sample]

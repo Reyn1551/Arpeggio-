@@ -1,0 +1,19 @@
+# Public sample task. ${NAME} placeholders are filled in by the test suite only
+# (tests/samplerepo.py), which generates the repository at test time.
+id: sample-fix-add
+category: bugfix
+expected_risk: low
+repo:
+  path: "${SAMPLE_REPO}"
+  base: "${SAMPLE_C0}"
+  solution: "${SAMPLE_C1}"
+request: >
+  calc.ops.add returns the wrong result: add(2, 3) gives -1.
+  Make it return the sum of its two arguments.
+done_criteria:
+  - kind: command
+    argv: ["${PYTHON}", "-m", "unittest", "discover", "-s", "tests", "-p", "test_calc.py"]
+    timeout_s: 120
+context_files: [src/calc/ops.py]
+tags: [python, sample]
+notes: Bugfix with a visible failing test. No hidden tests.
