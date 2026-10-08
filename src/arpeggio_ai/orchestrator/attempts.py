@@ -14,7 +14,7 @@ import json
 import logging
 import sqlite3
 from collections import Counter
-from collections.abc import Callable, Sequence
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -28,7 +28,7 @@ from arpeggio_ai.adapters.base import (
     Route,
     StepEvent,
 )
-from arpeggio_ai.core.errors import StoreError
+from arpeggio_ai.core.errors import ArpeggioError, StoreError
 from arpeggio_ai.core.ids import new_id
 from arpeggio_ai.core.logs import log_context
 from arpeggio_ai.evals.hidden import hidden_paths
@@ -72,6 +72,20 @@ from arpeggio_ai.verify.criteria import describe as describe_criterion
 from arpeggio_ai.verify.runner import run_criteria
 
 log = logging.getLogger(__name__)
+
+
+class PrepareError(ArpeggioError):
+    """Preparing the worktree for the checks failed (setup or hidden tests). Not escalated."""
+
+    def __init__(self, reason: str, detail: str) -> None:
+        super().__init__(f"{reason}: {detail}")
+        self.reason = reason
+        self.detail = detail
+
+
+# Runs in the worktree after the patch is applied and before the checks (eval runs: setup
+# commands, then hidden tests). Raises PrepareError to end the attempt.
+Prepare = Callable[[Path, str], Awaitable[None]]  # (worktree, attempt_id)
 
 RAW_PATCH_ARTIFACT = "patch-raw.diff"  # the diff as the model wrote it
 PATCH_ARTIFACT = "patch.diff"  # the diff after line-ending normalization, as applied
@@ -279,6 +293,10 @@ async def run_patch_attempt(
     max_steps: int = 4,
     context_files: Sequence[str] = (),
     eval_task: EvalTask | None = None,
+    route_reason: dict[str, object] | None = None,
+    feedback: str | None = None,
+    prepare: Prepare | None = None,
+    base: str | None = None,
 ) -> PatchAttemptOutcome:
     """Run one patch attempt end to end and set the attempt and task status.
 
@@ -293,6 +311,12 @@ async def run_patch_attempt(
     The worktree is kept for inspection. ``max_steps`` covers the model call and its
     retries. With ``eval_task`` attached, its hidden test paths are never read as context
     and never named in the attempt spec.
+
+    ``route_reason`` is stored on the attempt (default ``{"mode": "patch"}``). ``feedback``
+    is the previous attempt's failure report for an escalated attempt; it passes the secret
+    scanner like the rest of the prompt. ``prepare`` runs after the patch is applied and
+    before the checks; a ``PrepareError`` ends the attempt as ``error`` with its reason.
+    ``base`` is the full commit SHA the worktree starts from (default: the repo's HEAD).
     """
     task = get_task(conn, task_id)
     if task is None:
@@ -318,7 +342,7 @@ async def run_patch_attempt(
         model=route.model,
         effort=route.effort,
         verification=route.verification,
-        route_reason={"mode": "patch"},
+        route_reason=dict(route_reason) if route_reason is not None else {"mode": "patch"},
         provider_model=None if model is None else model.model,
     )
     set_task_status(conn, task_id, "routed")
@@ -332,6 +356,7 @@ async def run_patch_attempt(
                 attempt_id=attempt.id,
                 attempt_seq=attempt.seq,
                 env=env,
+                base=base,
             )
         except WorktreeError as error:
             return _record_failure(
@@ -349,6 +374,10 @@ async def run_patch_attempt(
         request, context_texts, redactions = _scan_prompt_parts(
             scanner, task.request, read_context(tree.path, context_files, hidden=hidden)
         )
+        if feedback is not None:
+            scanned = scanner.scan_logged(feedback, "prompt:feedback")
+            redactions.update(scanned.counts())
+            feedback = scanned.text
         _record_prompt(
             conn,
             artifacts,
@@ -357,7 +386,7 @@ async def run_patch_attempt(
             files=[path for path, _ in context_texts],
             redactions=redactions,
         )
-        prompt = build_prompt(request, checks, context_texts)
+        prompt = build_prompt(request, checks, context_texts, feedback)
         spec = AttemptSpec(
             task_id=task_id,
             attempt_id=attempt.id,
@@ -402,6 +431,19 @@ async def run_patch_attempt(
                 reason=error.reason,
                 detail=error.detail,
             )
+
+        if prepare is not None:
+            try:
+                await prepare(tree.path, attempt.id)
+            except PrepareError as error:
+                return _record_failure(
+                    conn,
+                    artifacts,
+                    task_id=task_id,
+                    attempt_id=attempt.id,
+                    reason=error.reason,
+                    detail=error.detail,
+                )
 
         set_task_status(conn, task_id, "verifying")
         verdicts = await run_criteria(

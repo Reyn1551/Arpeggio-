@@ -6,7 +6,10 @@ Used for done-criteria checks and for every git command Arpeggio runs in a workt
   ``ENV_ALLOWLIST`` plus the repo's ``check_env`` names, minus every variable a provider
   ``api_key`` references. Names compare case-insensitively on Windows.
 - **Executable.** ``argv[0]`` is looked up on the scrubbed ``PATH``, so the PATH the child
-  sees decides what runs. Windows ``.bat`` and ``.cmd`` files need a shell and are refused.
+  sees decides what runs. Windows ``.bat`` and ``.cmd`` files need a shell and are refused,
+  except that on Windows ``npm`` and ``npx`` run as ``node <npm-cli.js|npx-cli.js>`` from
+  the Node installation found on that PATH (EXE-09). npm usually needs ``APPDATA`` and
+  ``LOCALAPPDATA`` in the repo's ``check_env``.
 - **Output.** stdout and stderr go to one temporary file, in order. A killed process tree
   can never leave a pipe read hanging. At most ``MAX_OUTPUT_BYTES`` (10 MB) is kept: longer
   output keeps its last 10 MB behind a truncation marker. While the process runs, the file
@@ -57,6 +60,8 @@ ENV_ALLOWLIST: tuple[str, ...] = (
 )
 WINDOWS_ENV_ALLOWLIST: tuple[str, ...] = ("SYSTEMROOT", "COMSPEC", "PATHEXT")
 SHELL_SCRIPT_SUFFIXES = frozenset({".bat", ".cmd"})
+# On Windows these run as `node <npm dir>/bin/<name>-cli.js` instead of their .cmd shims.
+NPM_COMMANDS = frozenset({"npm", "npx"})
 REAP_WAIT_S = 5.0
 # Output kept per run. Longer output keeps its last part, where test summaries are.
 MAX_OUTPUT_BYTES = 10 * 1024 * 1024
@@ -133,6 +138,29 @@ def resolve_executable(name: str, env: Mapping[str, str], cwd: Path) -> str:
             " use an .exe or run the interpreter explicitly"
         )
     return found
+
+
+def resolve_npm(name: str, env: Mapping[str, str], cwd: Path) -> list[str]:
+    """Windows only (EXE-09): ``npm``/``npx`` as ``node <npm-cli.js|npx-cli.js>``.
+
+    ``node.exe`` comes from the scrubbed PATH and the script from the npm that ships with
+    that Node installation, so no ``.cmd`` shim and no shell is involved.
+    """
+    node = resolve_executable("node", env, cwd)
+    script = Path(node).parent / "node_modules" / "npm" / "bin" / f"{name}-cli.js"
+    if not script.is_file():
+        raise ProcessError(
+            f"{name} was requested but {script} does not exist; install npm with Node.js"
+            " or run `node <path to npm-cli.js>` explicitly"
+        )
+    return [node, str(script)]
+
+
+def resolve_argv(argv: Sequence[str], env: Mapping[str, str], cwd: Path) -> list[str]:
+    """``argv`` with ``argv[0]`` resolved to an absolute executable (see module docstring)."""
+    if IS_WINDOWS and argv[0].lower() in NPM_COMMANDS:
+        return [*resolve_npm(argv[0].lower(), env, cwd), *argv[1:]]
+    return [resolve_executable(argv[0], env, cwd), *argv[1:]]
 
 
 async def _kill_tree(pid: int) -> None:
@@ -393,7 +421,8 @@ async def run_process(
     """
     if not argv:
         raise ProcessError("argv must not be empty")
-    executable = resolve_executable(argv[0], env, cwd)
+    argv = resolve_argv(argv, env, cwd)
+    executable = argv[0]
     job = create_job()
     if sys.platform == "win32":
         # In a job the child starts suspended and runs only once it is inside the job.

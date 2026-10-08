@@ -193,19 +193,31 @@ CREATE TABLE eval_runs (
     started_at      TEXT NOT NULL,
     finished_at     TEXT,
     summary         TEXT,                       -- JSON: metrics with confidence intervals
-    profile         TEXT NOT NULL DEFAULT 'unknown'
+    profile         TEXT NOT NULL DEFAULT 'unknown',
+    status          TEXT NOT NULL DEFAULT 'completed', -- running|completed|partial|aborted
+    status_reason   TEXT,                       -- why a run is partial or aborted
+    repeats         INTEGER NOT NULL DEFAULT 1,
+    planned         INTEGER,                    -- task runs planned (tasks x repeats)
+    estimate_usd    REAL                        -- worst-case estimate before the run
 );
 
 CREATE TABLE eval_results (
-    eval_run_id     TEXT NOT NULL REFERENCES eval_runs(id),
-    eval_task       TEXT NOT NULL,              -- eval task file id
-    task_id         TEXT NOT NULL REFERENCES tasks(id),
-    solved          INTEGER NOT NULL,
-    cost_usd        REAL NOT NULL,
-    attempts        INTEGER NOT NULL,
-    duration_s      REAL NOT NULL,
-    quota_wait_s    REAL NOT NULL DEFAULT 0,  -- time spent waiting on quotas
-    PRIMARY KEY (eval_run_id, eval_task)
+    eval_run_id         TEXT    NOT NULL REFERENCES eval_runs(id),
+    eval_task           TEXT    NOT NULL,       -- eval task file id
+    task_id             TEXT    REFERENCES tasks(id),  -- NULL when the task was skipped
+    solved              INTEGER NOT NULL,
+    cost_usd            REAL    NOT NULL,
+    attempts            INTEGER NOT NULL,
+    duration_s          REAL    NOT NULL,
+    quota_wait_s        REAL    NOT NULL DEFAULT 0,  -- time spent waiting on quotas
+    repeat_index        INTEGER NOT NULL DEFAULT 0,
+    status              TEXT    NOT NULL DEFAULT 'completed', -- solved|failed|error|paused|skipped
+    status_reason       TEXT,                   -- skip reason or last failure reason
+    escalations         INTEGER NOT NULL DEFAULT 0,
+    estimate_usd        REAL,                   -- worst-case estimate for this task run
+    counterfactual_usd  REAL,                   -- same tokens on the counterfactual route
+    tags                TEXT,                   -- JSON: the eval task's tags at run time
+    PRIMARY KEY (eval_run_id, eval_task, repeat_index)
 );
 
 CREATE TABLE quota_usage (
@@ -241,7 +253,7 @@ CREATE TABLE schema_version (
 - `attempts.failure_reason` holds one of `patch_missing`, `patch_ambiguous`, `patch_unsafe`, `patch_does_not_apply`, `patch_mixed_line_endings`, `patch_line_endings_changed` or `patch_writes_redacted_placeholder` when patch mode fails before verification ([ADR-0008](adr/0008-single-shot-patch-executor.md)), or `worktree_failed` when the worktree could not be created. A `message` step with an artifact holds the detail, such as the offending path or git's error output. `patch_mixed_line_endings` means the diff did not apply and touches a file whose line breaks are neither 95% CRLF nor 95% LF, so its hunks were sent to git unchanged. `patch_line_endings_changed` means a file that was CRLF or LF has a different class after applying, which points at a bug in Arpeggio's normalization. `patch_writes_redacted_placeholder` means an added line contains `[REDACTED:`, so the model copied a placeholder from the redacted context into the file. The diff is rejected before anything is applied, and the detail lists `path:line` (line numbers in the new file), never the line contents. All three are new in M0.4.1 and need no migration.
 - A patch attempt records two `message` steps besides the model call. `prompt: <n> context files, <m> items redacted (<type>: <count>, ...)` points at `prompt-<id>.json`, which lists the context files and the redaction counts, never the prompt. `patch: <n> files (line endings crlf: <a>, lf: <b>)` points at `patch.diff`, the diff exactly as applied. The model's own diff is stored next to it as `patch-raw.diff`.
 - Text artifacts and the text columns above pass the secret scanner before they are written ([Secrets](07-SECURITY-AND-PRIVACY.md#secrets)).
-- Repositories exist for `repos`, `tasks`, `attempts`, `steps`, `done_criteria` and `verdicts`. The other tables, `quota_usage` included (first used in M1.11), get theirs in the milestone that first writes them.
+- Repositories exist for `repos`, `tasks`, `attempts`, `steps`, `done_criteria`, `verdicts`, `eval_runs` and `eval_results`. The other tables, `quota_usage` included (first used in M1.11), get theirs in the milestone that first writes them.
 - `cached_tokens` counts cache-hit input tokens, which are priced at `price_cache_hit_per_m`.
 - `steps.prompt_overhead_tokens` is how many input tokens a provider billed beyond our own estimate of the prompt we sent: `input_tokens - ceil(characters / 4)`, floored at 0. It is set only on model calls whose usage the provider reported, so estimated steps leave it `NULL`. The spend guard reads the highest value among the last 20 such steps for the same provider and model key (`max_prompt_overhead`).
 - A model call's price fields (`price_in_per_m`, `price_cache_hit_per_m`, `price_out_per_m`, `price_window`, `price_multiplier`) are the snapshot taken when the request started. Calls to free models and loopback providers store zero prices and `cost_usd = 0`, with their real token counts. `cost_usd` is rounded to 8 decimal places.
@@ -279,6 +291,7 @@ Other views to implement: `v_success_rate`, `v_escape_rate`, `v_route_stats` (pe
 |---|---|---|
 | `0001_initial.sql` | M0.2 | The v1 tables and indexes. |
 | `0002_budget_profiles.sql` | M0.2.5 | `tasks.profile` and `tasks.deferrable` (renamed in `0003`), `attempts.model_mismatch` and `attempts.deferred_until`, `steps.actual_model`, `steps.price_window`, `steps.price_multiplier` and `steps.price_cache_hit_per_m`, `eval_runs.profile`, `eval_results.quota_wait_s`, and the new `quota_usage` table. Existing rows get the defaults, so tasks and eval runs created before `0002` read `profile = 'unknown'`. |
+| `0006_eval_runs.sql` | M0.6 | `eval_runs.status`, `status_reason`, `repeats`, `planned` and `estimate_usd`. `eval_results` is rebuilt with the primary key `(eval_run_id, eval_task, repeat_index)`, a nullable `task_id`, and `status`, `status_reason`, `escalations`, `estimate_usd`, `counterfactual_usd` and `tags`. Existing runs read `status = 'completed'`, existing results keep their values with `repeat_index = 0` and `status` `solved` or `failed`. |
 | `0005_attempt_worktree.sql` | M0.4 | `attempts.base_sha` and `attempts.failure_reason`. Existing attempts read `NULL` in both. |
 | `0004_prompt_overhead.sql` | M0.3 | `steps.provider` and `steps.prompt_overhead_tokens`, plus the index `idx_steps_provider`. Existing steps read `NULL` in both columns. |
 | `0003_rename_deferrable.sql` | M0.2.6 | Renames `tasks.deferrable` to `tasks.is_deferrable`. `DEFERRABLE` is an SQLite keyword, so the old name had to be quoted in every query. Position, type and default are unchanged. |

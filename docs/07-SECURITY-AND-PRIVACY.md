@@ -87,6 +87,9 @@ Before using Arpeggio on employer or client code, confirm that sending that code
 - `arpeggio eval new` passes every file it writes through the secret scanner and prints counts per type, never values. Review a task before committing it if the counts are not zero.
 - Hidden tests never reach a model. With an eval task attached, the prompt builder refuses a context file whose path is a hidden test path before reading it. `notes` are never put in a prompt.
 - `eval check` runs setup commands and checks with the same environment allowlist, timeouts, output caps, process-tree kill and redaction as attempt checks. Its report stores statuses and artifact references, never output.
+- `eval run` sends the owner's code to providers, so SAF-07 applies to every route it plans: a `private` repo uses only `no_training` providers unless it opts in, and a `client` repo only providers in its `provider_allow`. A task with no allowed model is skipped with `no_allowed_route` and the opt-in it would need. Opting in is a deliberate act in the repo's own config ([route resolution](05-ROUTING-AND-COST.md#route-resolution-for-eval-runs)).
+- An escalated attempt gets a failure report, never a hidden test. Check output is included only when it cannot show one ([the failure report](06-EVALUATION.md#the-failure-report)).
+- Baseline reports describe private tasks: `eval report` writes Markdown under the evals directory and refuses a path inside the Arpeggio checkout.
 
 ## Free tiers and gateways
 

@@ -17,6 +17,7 @@ prepaid_balance_usd = 2.00      # required under "micro"
 reserve_usd         = 0.10      # micro only; never spend below this
 overhead_alert      = 0.10
 max_quota_wait_s    = 120
+eval_per_month_usd  = 0.50      # cap for eval runs per UTC month (arpeggio eval run)
 
 [providers.deepseek]
 kind      = "openai_compatible"         # anthropic | openai_compatible

@@ -546,12 +546,20 @@ def read_context(
     return chosen
 
 
-def build_prompt(request: str, checks: Sequence[str], context: Sequence[tuple[str, str]]) -> str:
-    """The user message: the task, the checks that judge it and the context files."""
+def build_prompt(
+    request: str,
+    checks: Sequence[str],
+    context: Sequence[tuple[str, str]],
+    feedback: str | None = None,
+) -> str:
+    """The user message: the task, the checks that judge it, the context files and, for an
+    escalated attempt, the previous attempt's failure report (VER-03)."""
     parts = [f"Task:\n{request.strip()}", "Checks that must pass after your diff is applied:"]
-    parts.append("\n".join(f"- {check}" for check in checks))
+    parts.append("\n".join(f"{n}. {check}" for n, check in enumerate(checks, start=1)))
     if context:
         parts.append("Files from the repository (paths relative to the root):")
         for path, text in context:
             parts.append(f"File `{path}`:\n````\n{text}\n````")
+    if feedback:
+        parts.append(f"Previous attempt:\n{feedback.strip()}")
     return "\n\n".join(parts) + "\n"

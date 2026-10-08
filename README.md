@@ -66,12 +66,15 @@ The other profiles are `micro-deepseek` (a few dollars of DeepSeek credit), `sta
 
 `arpeggio init` writes to `~/.arpeggio/`, or to `$ARPEGGIO_HOME` when that variable is set. Running it again only adds what is missing and brings the database schema up to date. It never deletes data. Fill in `config.toml` (providers, model ids, prices), then run `arpeggio config validate`. Use `arpeggio config show` to print the merged result. Every command accepts `--json` and prints one JSON object for scripts.
 
-The eval suite tooling makes no model calls. Your personal suite lives outside this repo, in `~/.arpeggio/evals/` by default ([how to add a task](docs/06-EVALUATION.md#how-to-add-a-task)):
+The examples call `arpeggio` directly. If it is not on your `PATH`, prefix each command with `uv run --project <path to this checkout>`. Your personal eval suite lives outside this repo, in `~/.arpeggio/evals/` by default ([how to add a task](docs/06-EVALUATION.md#how-to-add-a-task)). Only `eval run` without `--dry-run` calls models, within a spend cap ([baseline experiment](docs/06-EVALUATION.md#baseline-experiment-four-strategies), and [on Windows](docs/06-EVALUATION.md#privacy-opt-in-and-a-first-run-on-windows)):
 
 ```bash
 arpeggio eval new --repo ~/code/skriptif --base 3f2a9c1 --solution 9b81d07 --id skriptif-email-validation
 arpeggio eval check                  # self-check: checks fail at base and pass with the solution
 arpeggio eval list                   # tasks, latest status, holdout share
+arpeggio eval run --dry-run         # plan, routes and worst-case cost of the 4-strategy baseline
+arpeggio eval run --max-usd 0.10    # run it, refusing to start above the cap
+arpeggio eval report                # per-profile comparison with 95% intervals, Markdown in the evals dir
 arpeggio secrets scan ~/code/skriptif  # dry run of the secret scanner: file, line and type only
 ```
 
@@ -84,7 +87,6 @@ arpeggio setup                       # wizard: pick a profile, detect API keys, 
 arpeggio doctor                      # what this profile can and cannot do, missing keys, stale prices
 arpeggio run "add email validation to the signup form" --repo ~/code/skriptif
 arpeggio status                      # active tasks, today's spend, approval queue
-arpeggio eval run --strategy all     # 4-strategy baseline experiment on the eval suite
 arpeggio dash                        # dashboard at http://localhost:7777
 ```
 

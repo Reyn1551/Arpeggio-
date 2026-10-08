@@ -28,6 +28,7 @@ from pydantic import (
 )
 from pydantic_core import PydanticCustomError
 
+from arpeggio_ai.config.models import TaskCategory
 from arpeggio_ai.core.errors import ArpeggioError
 from arpeggio_ai.verify.criteria import (
     CommandCriterion,
@@ -43,9 +44,7 @@ REQUEST_MAX_CHARS = 4000
 TODO_REQUEST = "TODO: describe the task"
 Split = Literal["tuning", "holdout"]
 SPLIT_DIRS: dict[Split, str] = {"tuning": "tasks", "holdout": "holdout"}
-Category = Literal[
-    "feature", "bugfix", "refactor", "docs", "config", "data_pipeline", "ml_experiment", "other"
-]
+Category = TaskCategory
 Risk = Literal["low", "medium", "high"]
 NonEmpty = Annotated[str, StringConstraints(min_length=1)]
 

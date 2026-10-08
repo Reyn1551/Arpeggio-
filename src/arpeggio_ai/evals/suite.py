@@ -12,6 +12,7 @@ import json
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from pathlib import Path
 
 from arpeggio_ai.evals.task import SPLIT_DIRS, EvalTask, Split, TaskError, load_task
@@ -69,7 +70,20 @@ _REPORT = re.compile(r"check-[0-9TZ-]+\.json")
 
 def latest_statuses(evals_root: Path) -> dict[str, str]:
     """For each task ID, its status in the newest report that mentions it."""
-    statuses: dict[str, str] = {}
+    return {task_id: status for task_id, (status, _) in latest_checks(evals_root).items()}
+
+
+def _report_time(name: str) -> datetime | None:
+    stamp = name.removeprefix("check-").removesuffix(".json")
+    try:
+        return datetime.strptime(stamp, "%Y%m%dT%H%M%S%fZ").replace(tzinfo=UTC)
+    except ValueError:
+        return None
+
+
+def latest_checks(evals_root: Path) -> dict[str, tuple[str, datetime | None]]:
+    """For each task ID, its status and the time of the newest report that mentions it."""
+    statuses: dict[str, tuple[str, datetime | None]] = {}
     reports = sorted(
         (p for p in (evals_root / REPORTS_DIR).glob("check-*.json") if _REPORT.fullmatch(p.name)),
         reverse=True,
@@ -81,8 +95,41 @@ def latest_statuses(evals_root: Path) -> dict[str, str]:
             continue
         for task in data.get("tasks", []):
             if isinstance(task, dict) and isinstance(task.get("id"), str):
-                statuses.setdefault(task["id"], str(task.get("status")))
+                statuses.setdefault(task["id"], (str(task.get("status")), _report_time(report.name)))
     return statuses
+
+
+def referenced_files(entry: TaskEntry, evals_root: Path) -> list[Path]:
+    """The task file and every file it references in the evals dir."""
+    files = [entry.file]
+    task = entry.task
+    if task is not None:
+        relative = [test.source for test in task.hidden_tests]
+        if task.reference_diff is not None:
+            relative.append(task.reference_diff)
+        files += [evals_root / path for path in relative]
+    return files
+
+
+def run_status(entry: TaskEntry, evals_root: Path, checks: dict[str, tuple[str, datetime | None]]) -> str:
+    """``valid`` only if the latest self-check said so and is newer than the task file and
+    every file it references; ``stale_self_check`` if any of them changed since;
+    ``unchecked``, ``invalid_schema`` or the failing status otherwise."""
+    if entry.task is None:
+        return "invalid_schema"
+    status, checked_at = checks.get(entry.id, ("unchecked", None))
+    if status != "valid":
+        return status
+    if checked_at is None:
+        return "stale_self_check"
+    for file in referenced_files(entry, evals_root):
+        try:
+            modified = datetime.fromtimestamp(file.stat().st_mtime, UTC)
+        except OSError:
+            return "stale_self_check"
+        if modified >= checked_at:
+            return "stale_self_check"
+    return "valid"
 
 
 @dataclass(frozen=True, slots=True)

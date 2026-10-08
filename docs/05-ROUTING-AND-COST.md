@@ -69,6 +69,7 @@ prepaid_balance_usd = 2.00      # required under "micro"
 reserve_usd         = 0.10      # micro only; never spend below this
 overhead_alert      = 0.10
 max_quota_wait_s    = 120
+eval_per_month_usd  = 0.50      # cap for eval runs per UTC month (arpeggio eval run)
 
 [providers.deepseek]
 kind      = "openai_compatible"         # anthropic | openai_compatible
@@ -142,7 +143,7 @@ Risk is re-evaluated **after** execution using the real diff. If post-hoc risk i
 
 ## Routing policy v1 (rule-based)
 
-Declarative, first match wins (`config/policy.example.yaml`):
+Declarative, first match wins. The target shape for v1, with adapters and verification depth:
 
 ```yaml
 version: 1
@@ -178,6 +179,51 @@ Rules:
 - Escalation creates a **new attempt** that receives the previous attempt's failure report (failing checks, error output), never its full transcript.
 - Maximum attempts per task: 3 (configurable). After that the task goes to `needs_user`.
 - Provider fallback (outage, 429, 5xx) is not escalation: it retries the **same tier** on another allowed provider and does not count as a failed attempt.
+
+### The policy file
+
+M0.6 ships the first real policy file (RTE-04, [ADR-0010](adr/0010-baseline-runner-and-policy-file.md)). It drives the `arpeggio` eval strategy. The packaged default is `src/arpeggio_ai/routing/policy.default.yaml`, and `~/.arpeggio/policy.yaml` replaces it entirely when present. Rules name **tiers and efforts, never model keys**, so the same file works under every profile:
+
+```yaml
+version: 1
+rules:
+  - id: high-risk
+    when: { risk: high }
+    route: { tier: strongest, effort: high }
+    escalation: []
+  - id: docs-and-config
+    when: { risk: low, category: [docs, config] }
+    route: { tier: 1, effort: low }
+    escalation: [ { tier: 2, effort: medium } ]
+  - id: low-risk-code
+    when: { risk: low }
+    route: { tier: 2, effort: low }
+    escalation: [ { tier: 2, effort: high }, { tier: strongest, effort: high } ]
+  - id: medium-default
+    when: { risk: medium }
+    route: { tier: 2, effort: medium }
+    escalation: [ { tier: strongest, effort: high } ]
+  - id: fallback
+    when: {}
+    route: { tier: strongest, effort: high }
+    escalation: []
+```
+
+- `when` matches on `risk` (`low`, `medium`, `high`) and `category` (one or a list of eval task categories). An empty `when` matches everything. The first matching rule wins.
+- `tier: N` (1 to 3) is the cheapest allowed model of tier N, or of the nearest tier present (lower first, then higher). `tier: strongest` is the strongest allowed model.
+- `effort` is the requested level. A model that does not accept it gets the nearest level it does accept, the lower one on a tie, and the attempt records both.
+- `escalation` holds at most two routes, so a task gets at most three attempts.
+- The file is read with `yaml.safe_load` and validated with unknown fields rejected. An invalid file is a config error (exit code 2). The matched rule's `id` is stored in `attempts.route_reason`.
+
+### Route resolution for eval runs
+
+A route is a model key and an effort. Eval runs (M0.6) resolve routes only among the models allowed for the task's repo, using the global config merged with the repo's `.arpeggio/config.toml`:
+
+1. **Profile.** Under `free`, only `free = true` models and loopback providers (BUD-02).
+2. **SAF-07.** A `public` repo may use any provider. A `private` repo uses providers whose `data_use` is `no_training`, plus the others when its opt-in allows it (`allow_training_providers` under `[repo]`, else the global `[privacy]` value). A `client` repo uses only providers listed in its `provider_allow`, and among those only `no_training` ones unless the repo itself sets `allow_training_providers = true` ([Code privacy](07-SECURITY-AND-PRIVACY.md#code-privacy)). `provider_allow`, when set, narrows every class.
+3. **Placeholders.** A model whose id is still a template placeholder such as `<free-model-id>` is never used.
+
+Within the allowed set, `tierN` means every model whose key starts with `tierN.`. The **cheapest of tier N** has the lowest `price_out_per_m`, then the lowest `price_in_per_m`, then the first key name. The **strongest** is in the highest tier present, then has the highest `price_out_per_m`, then the first key name. If no model is allowed, the task is skipped with `no_allowed_route` and a message naming the blocked providers and the opt-in. There is never a silent fallback to a disallowed provider.
 
 ## When cascade pays off
 
@@ -284,6 +330,7 @@ The validation contract for `config.toml` (CFG-02 to CFG-10). Unknown fields are
 | `reserve_usd` | float | Default 0.10. Under `micro` it must be below `prepaid_balance_usd`, and Arpeggio never spends below it (BUD-03) |
 | `overhead_alert` | float | `0 < x <= 1`, default 0.10 |
 | `max_quota_wait_s` | int | `>= 0`, default 120 (QTA-03) |
+| `eval_per_month_usd` | float | Optional, `>= 0`. Cap on eval run spend per UTC month: costs of attempts linked to eval results ([06](06-EVALUATION.md#budget-estimate-and-cap)). Must be 0 (or unset) under `free`. Unset means every `eval run` needs `--max-usd`. The packaged templates set it explicitly |
 
 ### `[providers.<name>]`
 
@@ -335,6 +382,8 @@ The key is `tier1`, `tier2` or `tier3`, a dot, then lowercase letters, digits, `
 | Field | Type | Rule |
 |---|---|---|
 | `dir` | string | Optional, an absolute path (`~` is expanded). Where the personal eval suite lives. Unset means `<ARPEGGIO_HOME>/evals`, and the `ARPEGGIO_EVALS_DIR` environment variable overrides both ([06](06-EVALUATION.md#where-the-suite-lives)) |
+| `max_tokens` | int | Default 8192, `>= 1`. Output cap per model call in eval runs. It is also the output side of the worst-case estimate, so a lower value lowers the estimate |
+| `middle` | table | Optional. Overrides of the `middle` strategy's map, `category = "model_key"`, for example `docs = "tier1.flash"`. Categories are the eval task categories, and every model key must exist ([06](06-EVALUATION.md#strategies)) |
 
 ### `[repo]` (only in `<repo>/.arpeggio/config.toml`)
 

@@ -19,7 +19,7 @@ from arpeggio_ai.store.db import (
 )
 
 DOCS_SCHEMA = Path(__file__).parents[2] / "docs" / "04-DATA-MODEL.md"
-LATEST = 5
+LATEST = 6
 
 
 def names(conn: sqlite3.Connection, kind: str) -> set[str]:
@@ -463,11 +463,48 @@ def test_v4_database_with_attempts_upgrades_to_v5(tmp_path: Path) -> None:
     conn = v1_database(tmp_path / "arpeggio.db")
     try:
         migrate(conn, packaged_migrations()[:4])
-        assert migrate(conn) == [5]
+        assert migrate(conn, packaged_migrations()[:5]) == [5]
         assert columns(conn, "attempts")[-2:] == ["base_sha", "failure_reason"]
         row = conn.execute(
             "SELECT model, status, base_sha, failure_reason FROM attempts WHERE id = 'A1'"
         ).fetchone()
         assert tuple(row) == ("tier1.cheap", "completed", None, None)
+    finally:
+        conn.close()
+
+
+def test_v5_database_with_eval_rows_upgrades_to_v6(tmp_path: Path) -> None:
+    conn = v1_database(tmp_path / "arpeggio.db")
+    try:
+        migrate(conn, packaged_migrations()[:5])
+        assert migrate(conn) == [6]
+        run = conn.execute(
+            "SELECT strategy, profile, status, status_reason, repeats, planned, estimate_usd"
+            " FROM eval_runs WHERE id = 'E1'"
+        ).fetchone()
+        assert tuple(run) == ("middle", "unknown", "completed", None, 1, None, None)
+        result = conn.execute(
+            "SELECT eval_task, task_id, solved, cost_usd, attempts, duration_s, quota_wait_s,"
+            " repeat_index, status, escalations, counterfactual_usd, tags FROM eval_results"
+        ).fetchone()
+        assert tuple(result) == ("web-001", "T1", 1, 0.5, 1, 12.0, 0.0, 0, "solved", 0, None, None)
+        # A second repeat of the same task now fits, and a skipped task needs no task row.
+        conn.executescript(
+            """
+            INSERT INTO eval_results (eval_run_id, eval_task, task_id, solved, cost_usd,
+                attempts, duration_s, repeat_index, status)
+                VALUES ('E1', 'web-001', 'T1', 0, 0.2, 2, 3.0, 1, 'failed');
+            INSERT INTO eval_results (eval_run_id, eval_task, task_id, solved, cost_usd,
+                attempts, duration_s, status, status_reason)
+                VALUES ('E1', 'web-002', NULL, 0, 0, 0, 0, 'skipped', 'no_allowed_route');
+            """
+        )
+        assert conn.execute("SELECT COUNT(*) FROM eval_results").fetchone() == (3,)
+        with pytest.raises(sqlite3.IntegrityError):
+            conn.execute(
+                "INSERT INTO eval_results (eval_run_id, eval_task, task_id, solved, cost_usd,"
+                " attempts, duration_s, repeat_index) VALUES ('E1', 'web-001', 'T1', 0, 0, 0, 0, 1)"
+            )
+        assert conn.execute("PRAGMA foreign_key_check").fetchall() == []
     finally:
         conn.close()

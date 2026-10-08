@@ -84,6 +84,7 @@
 | EXE-06 | P0 | Each attempt MUST have a wall-clock timeout and a step limit. | Exceeding either ends the attempt with status `timeout`. |
 | EXE-07 | P1 | Execution SHOULD support container sandboxing (Docker/Podman) as an option per repo. | `sandbox = "container"` runs the agent inside a container. |
 | EXE-08 | P0 | The `api` adapter MUST support patch mode: the model returns exactly one unified diff, which is validated and applied in the attempt worktree before verification. Invalid, unsafe, or non-applying patches end the attempt as failed with a stored reason. | Integration tests cover apply, conflict, unsafe path, and malformed output. |
+| EXE-09 | P0 | On Windows, `npm` and `npx` in setup or criteria argv are executed as `node <npm-cli.js\|npx-cli.js>` resolved from the Node installation; all other `.cmd`/`.bat` files remain refused. | Windows test runs `npm --version` through the resolver; `.cmd` files other than npm/npx are still refused. |
 
 ### Verification (VER)
 

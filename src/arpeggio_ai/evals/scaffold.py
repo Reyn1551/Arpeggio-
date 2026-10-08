@@ -6,6 +6,11 @@ written as ``fixtures/<id>/reference.diff``. The task file starts with a TODO ``
 and no ``done_criteria``, so ``eval check`` reports it ``invalid_schema`` until the owner
 fills both in. Every file written is passed through the secret scanner and only counts per
 type are reported.
+
+``request``, ``category`` and ``risk`` fill those fields directly. ``text_check`` adds a
+generated Node hidden test that asserts a regular expression matches one file, after
+verifying it fails at base and passes at solution (``evals/textcheck.py``), and makes
+``node --test <that test>`` the done criterion.
 """
 
 import json
@@ -15,7 +20,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from arpeggio_ai.core.errors import ArpeggioError
-from arpeggio_ai.evals.task import SPLIT_DIRS, TASK_ID, TODO_REQUEST, Split
+from arpeggio_ai.evals.task import SPLIT_DIRS, TASK_ID, TODO_REQUEST, Category, Risk, Split
+from arpeggio_ai.evals.textcheck import TextCheck, TextCheckError, hidden_path, render, verify
 from arpeggio_ai.safety.fileset import is_binary, matches_any
 from arpeggio_ai.safety.process import ProcessResult
 from arpeggio_ai.safety.secret_scan import SecretScanner
@@ -36,8 +42,8 @@ _TEMPLATE = """\
 # `arpeggio eval check --id {id}`. Field reference: docs/06-EVALUATION.md.
 id: {id}
 # category: feature | bugfix | refactor | docs | config | data_pipeline | ml_experiment | other
-category: other
-expected_risk: low       # low | medium | high
+category: {category}
+expected_risk: {risk}       # low | medium | high
 repo:
   path: {path}
   base: {base}
@@ -46,7 +52,7 @@ request: {request}
 # setup:                 # optional, runs in the worktree before the checks
 #   - argv: ["composer", "install", "--no-interaction"]
 #     timeout_s: 600
-done_criteria: []
+done_criteria:{done}
 # done_criteria:         # at least one; argv is a list, never a shell string
 #   - kind: command
 #     argv: ["uv", "run", "pytest", "tests/test_example.py"]
@@ -100,6 +106,16 @@ def _changes(listing: bytes) -> list[tuple[str, str]]:
     return [(parts[i], parts[i + 1]) for i in range(0, len(parts) - 1, 2) if parts[i]]
 
 
+async def _text_at(
+    repo: Path, sha: str, path: str, *, env: Mapping[str, str], home: Path
+) -> str | None:
+    """The file's text at ``sha``, or None if it does not exist there."""
+    result = await git(["show", f"{sha}:{path}"], cwd=repo, env=env, home=home)
+    if result.exit_code != 0:
+        return None
+    return result.output.decode("utf-8", errors="replace")
+
+
 async def scaffold(
     repo: Path,
     base: str,
@@ -113,6 +129,10 @@ async def scaffold(
     holdout: bool = False,
     test_globs: Sequence[str] = DEFAULT_TEST_GLOBS,
     force: bool = False,
+    request: str | None = None,
+    category: Category = "other",
+    risk: Risk = "low",
+    text_check: TextCheck | None = None,
 ) -> NewTask:
     if TASK_ID.fullmatch(task_id) is None:
         raise ScaffoldError(f"invalid task id {task_id!r}: must match ^[a-z0-9][a-z0-9-]{{2,63}}$")
@@ -151,6 +171,15 @@ async def scaffold(
         )
         for path in hidden
     }
+    generated: bytes | None = None
+    if text_check is not None:
+        at_base = await _text_at(repo, base_sha, text_check.file, env=env, home=home)
+        at_solution = await _text_at(repo, solution_sha, text_check.file, env=env, home=home)
+        try:
+            verify(text_check, at_base, at_solution)
+        except TextCheckError as error:
+            raise ScaffoldError(str(error)) from None
+        generated = render(task_id, text_check)
     excludes = [f":(exclude,literal){path}" for path in hidden]
     diff = _ok(
         await git(
@@ -186,6 +215,18 @@ async def scaffold(
         target.write_bytes(data)
         written.append(target)
         entries.append(f"\n  - path: {_q(path)}\n    source: {_q(source)}")
+    done = " []"
+    if generated is not None:
+        path = hidden_path(task_id)
+        source = f"fixtures/{task_id}/hidden/{path}"
+        target = evals_root / source
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(generated)
+        written.append(target)
+        hidden.append(path)
+        entries.append(f"\n  - path: {_q(path)}\n    source: {_q(source)}")
+        argv = ", ".join(_q(arg) for arg in ("node", "--test", path))
+        done = f"\n  - kind: command\n    argv: [{argv}]"
     reference = None
     if diff.strip():
         reference = f"fixtures/{task_id}/reference.diff"
@@ -199,7 +240,10 @@ async def scaffold(
         path=_q(repo.as_posix()),
         base=_q(base_sha),
         solution=_q(solution_sha),
-        request=_q(TODO_REQUEST),
+        request=_q(TODO_REQUEST if request is None else request),
+        category=category,
+        risk=risk,
+        done=done,
         hidden="".join(entries) if entries else " []",
         reference="null" if reference is None else _q(reference),
     )
