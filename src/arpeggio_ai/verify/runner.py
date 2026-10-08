@@ -6,11 +6,15 @@ picture (VER-04). Command output goes to an artifact ``check-<n>.log``, and the 
 keeps the exit code, duration, the timeout and output-limit flags and the last 2,000
 characters of output. Output is redacted by the secret scanner before the tail is cut
 (NFR-06).
+
+``run_specs`` does the same without a database: eval self-checks use it with a callback that
+stores each log wherever the caller wants.
 """
 
 import logging
 import sqlite3
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -18,6 +22,9 @@ from arpeggio_ai.safety.process import ProcessError, run_process
 from arpeggio_ai.store.artifacts import ArtifactStore, redact_artifact
 from arpeggio_ai.store.repositories import Verdict, add_verdict, list_criteria
 from arpeggio_ai.verify.criteria import CommandCriterion, FileExistsCriterion
+
+Spec = CommandCriterion | FileExistsCriterion
+WriteLog = Callable[[str, bytes], str]
 
 log = logging.getLogger(__name__)
 
@@ -72,6 +79,40 @@ def _file_exists(criterion: FileExistsCriterion, worktree: Path) -> tuple[bool, 
     return target.exists(), {"path": criterion.path, "exists": target.exists()}
 
 
+@dataclass(frozen=True, slots=True)
+class CheckResult:
+    passed: bool
+    detail: dict[str, Any]
+    log_ref: str | None
+
+
+async def run_specs(
+    specs: Sequence[Spec], *, worktree: Path, env: Mapping[str, str], write_log: WriteLog
+) -> list[CheckResult]:
+    """Run every spec in order, even after a failure. ``write_log(name, output)`` stores a
+    command's redacted output and returns its reference."""
+    results: list[CheckResult] = []
+    for number, criterion in enumerate(specs, start=1):
+        log_ref = None
+        if isinstance(criterion, CommandCriterion):
+            name = f"check-{number}.log"
+            passed, detail, output = await _run_command(criterion, worktree, env, name)
+            log_ref = write_log(name, output)
+        else:
+            passed, detail = _file_exists(criterion, worktree)
+        log.info(
+            "verify.check",
+            extra={
+                "check": number,
+                "criterion_kind": criterion.kind,
+                "passed": passed,
+                "timed_out": bool(detail.get("timed_out")),
+            },
+        )
+        results.append(CheckResult(passed, detail, log_ref))
+    return results
+
+
 async def run_criteria(
     conn: sqlite3.Connection,
     artifacts: ArtifactStore,
@@ -82,33 +123,22 @@ async def run_criteria(
     env: Mapping[str, str],
 ) -> list[Verdict]:
     """Run every criterion of the task, store a verdict for each, and return them in order."""
-    verdicts: list[Verdict] = []
-    for number, row in enumerate(list_criteria(conn, task_id), start=1):
-        criterion = row.parsed()
-        log_ref = None
-        if isinstance(criterion, CommandCriterion):
-            name = f"check-{number}.log"
-            passed, detail, output = await _run_command(criterion, worktree, env, name)
-            log_ref = artifacts.write(task_id, attempt_id, name, output)
-        else:
-            passed, detail = _file_exists(criterion, worktree)
-        verdict = add_verdict(
+    rows = list_criteria(conn, task_id)
+    results = await run_specs(
+        [row.parsed() for row in rows],
+        worktree=worktree,
+        env=env,
+        write_log=lambda name, data: artifacts.write(task_id, attempt_id, name, data),
+    )
+    return [
+        add_verdict(
             conn,
             attempt_id,
             kind="check",
-            passed=passed,
+            passed=result.passed,
             criterion_id=row.id,
-            detail=detail,
-            log_ref=log_ref,
+            detail=result.detail,
+            log_ref=result.log_ref,
         )
-        log.info(
-            "verify.check",
-            extra={
-                "check": number,
-                "criterion_kind": criterion.kind,
-                "passed": passed,
-                "timed_out": bool(detail.get("timed_out")),
-            },
-        )
-        verdicts.append(verdict)
-    return verdicts
+        for row, result in zip(rows, results, strict=True)
+    ]
