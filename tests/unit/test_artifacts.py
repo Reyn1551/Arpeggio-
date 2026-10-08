@@ -4,9 +4,11 @@ import sys
 from pathlib import Path
 
 import pytest
+from fakes import FAKE_KEY
 
 from arpeggio_ai.core.errors import StoreError
 from arpeggio_ai.paths import artifacts_dir
+from arpeggio_ai.safety.secret_scan import SecretScanner, use_scanner
 from arpeggio_ai.store.artifacts import ArtifactStore
 
 
@@ -63,3 +65,36 @@ def test_new_directories_are_0700(store: ArtifactStore, home: Path) -> None:
         os.umask(previous)
     for path in (home / "artifacts", home / "artifacts" / "T1", home / "artifacts" / "T1" / "A1"):
         assert stat.S_IMODE(path.stat().st_mode) == 0o700, path
+
+
+# Content secret scan (NFR-06)
+
+AWS = "AKIA" + "Q7RZ3MX9KD2LPW5T"
+
+
+def test_text_artifacts_are_redacted(
+    store: ArtifactStore, caplog: pytest.LogCaptureFixture
+) -> None:
+    with use_scanner(SecretScanner(configured=[FAKE_KEY])):
+        ref = store.write("T1", "A1", "check-1.log", f"{AWS}\nkey={FAKE_KEY}\n".encode())
+    assert store.read(ref) == b"[REDACTED:aws_access_key]\nkey=[REDACTED:configured_key]\n"
+    [record] = [r for r in caplog.records if r.getMessage() == "secret_scan.redacted"]
+    assert record.__dict__["source"] == "artifact:check-1.log"
+    assert record.__dict__["types"] == {"aws_access_key": 1, "configured_key": 1}
+
+
+def test_non_utf8_text_is_scanned_and_other_bytes_kept(store: ArtifactStore) -> None:
+    data = "café ".encode("cp1252") + AWS.encode() + b" \xff\r\n"
+    ref = store.write("T1", "A1", "check-2.log", data)
+    assert store.read(ref) == b"caf\xe9 [REDACTED:aws_access_key] \xff\r\n"
+
+
+def test_binary_artifacts_are_not_scanned(store: ArtifactStore) -> None:
+    data = b"\x00\x01" + AWS.encode()
+    ref = store.write("T1", "A1", "blob.bin", data)
+    assert store.read(ref) == data
+
+
+def test_clean_text_is_written_byte_for_byte(store: ArtifactStore) -> None:
+    data = b"line one\r\nline two\n\xff"
+    assert store.read(store.write("T1", "A1", "plain.txt", data)) == data
