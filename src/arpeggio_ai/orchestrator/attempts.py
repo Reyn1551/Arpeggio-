@@ -85,7 +85,7 @@ class PrepareError(ArpeggioError):
 
 # Runs in the worktree after the patch is applied and before the checks (eval runs: setup
 # commands, then hidden tests). Raises PrepareError to end the attempt.
-Prepare = Callable[[Path], Awaitable[None]]
+Prepare = Callable[[Path, str], Awaitable[None]]  # (worktree, attempt_id)
 
 RAW_PATCH_ARTIFACT = "patch-raw.diff"  # the diff as the model wrote it
 PATCH_ARTIFACT = "patch.diff"  # the diff after line-ending normalization, as applied
@@ -296,6 +296,7 @@ async def run_patch_attempt(
     route_reason: dict[str, object] | None = None,
     feedback: str | None = None,
     prepare: Prepare | None = None,
+    base: str | None = None,
 ) -> PatchAttemptOutcome:
     """Run one patch attempt end to end and set the attempt and task status.
 
@@ -315,6 +316,7 @@ async def run_patch_attempt(
     is the previous attempt's failure report for an escalated attempt; it passes the secret
     scanner like the rest of the prompt. ``prepare`` runs after the patch is applied and
     before the checks; a ``PrepareError`` ends the attempt as ``error`` with its reason.
+    ``base`` is the full commit SHA the worktree starts from (default: the repo's HEAD).
     """
     task = get_task(conn, task_id)
     if task is None:
@@ -354,6 +356,7 @@ async def run_patch_attempt(
                 attempt_id=attempt.id,
                 attempt_seq=attempt.seq,
                 env=env,
+                base=base,
             )
         except WorktreeError as error:
             return _record_failure(
@@ -431,7 +434,7 @@ async def run_patch_attempt(
 
         if prepare is not None:
             try:
-                await prepare(tree.path)
+                await prepare(tree.path, attempt.id)
             except PrepareError as error:
                 return _record_failure(
                     conn,
