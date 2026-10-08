@@ -19,7 +19,15 @@ from rich.table import Table
 from rich.text import Text
 
 from arpeggio_ai.adapters.base import AdapterContext
-from arpeggio_ai.cli.output import JSON_HELP, console, emit_json, json_mode, run_command
+from arpeggio_ai.cli.output import (
+    EXIT_CONFIG,
+    JSON_HELP,
+    console,
+    emit_json,
+    fail,
+    json_mode,
+    run_command,
+)
 from arpeggio_ai.config.loader import load_config, load_config_if_present
 from arpeggio_ai.config.models import Config
 from arpeggio_ai.core.logs import configure_logging
@@ -37,7 +45,8 @@ from arpeggio_ai.evals.scaffold import DEFAULT_TEST_GLOBS, NewTask, scaffold
 from arpeggio_ai.evals.selfcheck import CheckRun, TaskCheck
 from arpeggio_ai.evals.strategies import REFERENCE, STRATEGIES, Strategy
 from arpeggio_ai.evals.suite import REPORTS_DIR, discover, latest_statuses, select, summarize
-from arpeggio_ai.evals.task import EvalTask
+from arpeggio_ai.evals.task import Category, EvalTask, Risk
+from arpeggio_ai.evals.textcheck import TextCheck
 from arpeggio_ai.orchestrator.attempts import overhead_history
 from arpeggio_ai.paths import arpeggio_home, artifacts_dir, db_path, evals_dir, logs_dir
 from arpeggio_ai.routing.policy import load_policy
@@ -97,10 +106,47 @@ def new_command(
         ),
     ] = None,
     force: Annotated[bool, typer.Option("--force", help="Overwrite an existing task.")] = False,
+    request: Annotated[
+        str | None, typer.Option("--request", help="The task as you would ask for it.")
+    ] = None,
+    check_file: Annotated[
+        str | None,
+        typer.Option("--check-file", help="Repo file a generated hidden test checks (POSIX path)."),
+    ] = None,
+    check_pattern: Annotated[
+        str | None,
+        typer.Option(
+            "--check-pattern",
+            help="Regex that must match --check-file at the solution and not at base"
+            " (JavaScript RegExp at run time).",
+        ),
+    ] = None,
+    check_name: Annotated[
+        str | None, typer.Option("--check-name", help="Name of the generated test.")
+    ] = None,
+    category: Annotated[Category, typer.Option("--category", help="Task category.")] = "other",
+    risk: Annotated[Risk, typer.Option("--risk", help="Expected risk.")] = "low",
     json_flag: JsonOption = False,
 ) -> None:
     """Scaffold a task from a base commit and a solution commit."""
     as_json = json_mode(ctx, json_flag)
+    if (check_file is None) != (check_pattern is None):
+        fail(
+            [
+                {
+                    "file": None,
+                    "field": None,
+                    "message": "give --check-file and --check-pattern together",
+                }
+            ],
+            as_json,
+            EXIT_CONFIG,
+        )
+    text_check = (
+        None
+        if check_file is None or check_pattern is None
+        else TextCheck(check_file.replace("\\", "/"), check_pattern, check_name)
+    )
 
     def action() -> NewTask:
         config = load_config_if_present(repo)
@@ -118,6 +164,10 @@ def new_command(
                 holdout=holdout,
                 test_globs=tuple(tests_glob) if tests_glob else DEFAULT_TEST_GLOBS,
                 force=force,
+                request=request,
+                category=category,
+                risk=risk,
+                text_check=text_check,
             )
         )
 
@@ -134,7 +184,10 @@ def new_command(
     out.print(f"reference diff: {result.reference_diff or 'none'}", markup=False)
     findings = ", ".join(f"{k} {v}" for k, v in result.findings.items()) or "none"
     out.print(f"secret scan: {result.files_scanned} files, findings: {findings}", markup=False)
-    out.print("Next: fill in `request` and `done_criteria`, then run `arpeggio eval check`.")
+    if text_check is not None and request is not None:
+        out.print(f"Next: run `arpeggio eval check --id {result.id}`.", markup=False)
+    else:
+        out.print("Next: fill in `request` and `done_criteria`, then run `arpeggio eval check`.")
 
 
 @app.command("check")
