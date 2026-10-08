@@ -8,6 +8,11 @@ logs or messages. Request and response bodies travel only in ``StepEvent.payload
 the orchestrator stores as an artifact. Every message passes the secret scanner before the
 guard estimates its size, so requests and their artifacts carry only redacted text (SAF-02).
 
+Only ``message.content`` is the answer. Reasoning fields (``reasoning_content`` and the like)
+stay in the artifact and are never returned as the reply. Each model call records its
+``finish_reason`` and reported reasoning tokens, and the result says whether the last reply
+stopped at the output limit (``TRUNCATED_FINISH_REASONS``).
+
 See ADR-0007 and docs/05-ROUTING-AND-COST.md for the rules this implements.
 """
 
@@ -53,14 +58,16 @@ BACKOFF_CAP_S = 30.0
 CONNECT_TIMEOUT_S = 10.0
 RETRY_STATUSES = frozenset({429, 500, 502, 503, 504})
 KEY_STATUSES = frozenset({401, 403})
+# finish_reason values meaning the reply hit max_tokens ("max_tokens" from some gateways).
+TRUNCATED_FINISH_REASONS = frozenset({"length", "max_tokens"})
 
 
 class _Finished(Exception):
     """Ends the run with a result. Internal to this module."""
 
-    def __init__(self, status: AttemptStatus, message: str) -> None:
+    def __init__(self, status: AttemptStatus, message: str, *, truncated: bool = False) -> None:
         super().__init__(message)
-        self.result = AttemptResult(status=status, final_message=message)
+        self.result = AttemptResult(status=status, final_message=message, truncated=truncated)
 
 
 def _summary(text: str) -> str:
@@ -112,6 +119,25 @@ def _content(data: Any) -> str | None:
     return content if isinstance(content, str) else None
 
 
+def _finish_reason(data: Any) -> str | None:
+    try:
+        reason = data["choices"][0]["finish_reason"]
+    except (KeyError, IndexError, TypeError):
+        return None
+    return reason if isinstance(reason, str) else None
+
+
+def _reasoning_tokens(data: Any) -> int | None:
+    """``usage.completion_tokens_details.reasoning_tokens`` if it is an int >= 0."""
+    try:
+        value = data["usage"]["completion_tokens_details"]["reasoning_tokens"]
+    except (KeyError, IndexError, TypeError):
+        return None
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        return None
+    return value
+
+
 def retry_after_seconds(value: str | None, now: datetime) -> float | None:
     """Seconds to wait from a ``Retry-After`` header (seconds or HTTP date), if readable."""
     if value is None:
@@ -145,6 +171,7 @@ class _Outcome:
 
     event: StepEvent | None = None
     reply: str | None = None
+    truncated: bool = False  # the reply stopped at the output limit
     status: int | None = None
     failure: str | None = None  # why to retry, for example "HTTP 503"
     fatal: str | None = None  # ends the attempt with fatal_status
@@ -220,6 +247,7 @@ class ApiAdapter:
         if spec.system:
             messages.append(Message("system", scanner.redact(spec.system, "message:system")))
         reply = ""
+        truncated = False
         sent = 0
         async with httpx.AsyncClient(transport=self._context.transport, timeout=timeout) as client:
             for index, turn in enumerate([spec.prompt, *spec.follow_ups]):
@@ -262,6 +290,7 @@ class ApiAdapter:
                         raise _Finished(outcome.fatal_status, outcome.fatal)
                     if outcome.reply is not None:
                         reply = outcome.reply
+                        truncated = outcome.truncated
                         source = f"message:assistant:{index}"
                         messages.append(Message("assistant", scanner.redact(reply, source)))
                         break
@@ -279,7 +308,7 @@ class ApiAdapter:
                     await self._context.sleep(delay)
                     retries += 1
                     last_failure = outcome.failure
-        raise _Finished("completed", reply)
+        raise _Finished("completed", reply, truncated=truncated)
 
     def _check_route(self, spec: AttemptSpec, model: ModelSpec, provider: Provider) -> None:
         if provider.kind != "openai_compatible":
@@ -397,7 +426,10 @@ class ApiAdapter:
             if content is None:
                 fatal = f"provider {model.provider} returned a response Arpeggio cannot read"
                 return _Outcome(event=event, status=status, fatal=fatal)
-            return _Outcome(event=event, reply=content, status=status)
+            truncated = _finish_reason(data) in TRUNCATED_FINISH_REASONS
+            if truncated:
+                log.warning("adapter.output_truncated", extra={"provider": model.provider})
+            return _Outcome(event=event, reply=content, truncated=truncated, status=status)
 
         # Errors are billed only when the provider reports usage for them.
         billed: StepEvent | None = None
@@ -490,6 +522,8 @@ class ApiAdapter:
             model_mismatch=is_mismatch(actual, model),
             provider=model.provider,
             prompt_overhead_tokens=overhead,
+            finish_reason=_finish_reason(data),
+            reasoning_tokens=_reasoning_tokens(data),
         )
 
     def _failure_message(self, provider_name: str, status: int) -> str:

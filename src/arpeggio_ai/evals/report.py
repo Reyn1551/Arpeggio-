@@ -10,7 +10,14 @@ section every strategy gets:
   task** (total cost / solved; failed tasks stay in the numerator on purpose),
 - mean attempts, escalations, wall-clock and quota wait (0 until M1.11),
 - share of cost that was estimated rather than reported, model-mismatch count,
-- counterfactual cost and savings against it (CST-05).
+- counterfactual cost and savings against it (CST-05),
+- attempt outcomes (``FAILURE_KINDS``): attempts per ``failure_reason`` among
+  ``output_truncated``, ``patch_missing`` and ``patch_does_not_apply``, and
+  ``checks_failed`` (a completed attempt with a failing verdict). Counted per attempt, so
+  an escalated task run can add several,
+- reasoning share: reasoning tokens over the output tokens of the model calls that report
+  reasoning tokens (``n/a`` if none does). Calls that do not report them are left out of
+  both sides rather than counted as zero reasoning.
 
 **Statistics.** Bootstrap over tasks: tasks are resampled with replacement and a task's
 repeats stay together. ``RESAMPLES`` resamples from ``random.Random(seed)``, 95% percentile
@@ -40,6 +47,7 @@ DEFAULT_SEED = 20261008
 MIN_TASKS = 10
 MIN_GROUP = 5
 UNRELIABLE_DROP_SHARE = 0.05
+FAILURE_KINDS = ("output_truncated", "patch_missing", "patch_does_not_apply", "checks_failed")
 SPLIT_LABELS = {
     "holdout": "headline (holdout)",
     "tuning": "tuning: not for claims",
@@ -65,6 +73,9 @@ class TaskRun:
     tags: tuple[str, ...]
     category: str
     risk: str
+    failures: dict[str, int] = field(default_factory=dict)  # FAILURE_KINDS -> attempts
+    reasoning_tokens: int = 0
+    reasoning_output_tokens: int = 0  # output tokens of calls that report reasoning tokens
 
 
 @dataclass(frozen=True, slots=True)
@@ -99,6 +110,9 @@ class StrategyMetrics:
     success_ci: Interval
     cost_per_solved_ci: Interval
     skipped: list[dict[str, str]]
+    failures: dict[str, int]  # FAILURE_KINDS -> attempts, in that order
+    reasoning_tokens: int
+    reasoning_share: float | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -177,6 +191,27 @@ def _task_facts(conn: sqlite3.Connection, task_id: str) -> tuple[float, int, str
     return float(row[0]), int(row[1]), str(task[0] or "other"), str(task[1] or "unknown")
 
 
+def _attempt_facts(conn: sqlite3.Connection, task_id: str) -> tuple[dict[str, int], int, int]:
+    """(attempts per FAILURE_KINDS, reasoning tokens, output tokens of reporting calls)."""
+    failures = dict.fromkeys(FAILURE_KINDS, 0)
+    for (reason,) in conn.execute(
+        "SELECT CASE WHEN a.failure_reason IS NOT NULL THEN a.failure_reason"
+        " WHEN a.status = 'completed' AND EXISTS (SELECT 1 FROM verdicts v"
+        " WHERE v.attempt_id = a.id AND NOT v.passed) THEN 'checks_failed' END"
+        " FROM attempts a WHERE a.task_id = ?",
+        (task_id,),
+    ):
+        if reason in failures:
+            failures[reason] += 1
+    row = conn.execute(
+        "SELECT COALESCE(SUM(s.reasoning_tokens), 0), COALESCE(SUM(s.output_tokens), 0)"
+        " FROM steps s JOIN attempts a ON a.id = s.attempt_id"
+        " WHERE a.task_id = ? AND s.reasoning_tokens IS NOT NULL",
+        (task_id,),
+    ).fetchone()
+    return failures, int(row[0]), int(row[1])
+
+
 def load_task_runs(
     conn: sqlite3.Connection, run: EvalRun
 ) -> tuple[list[TaskRun], list[dict[str, str]]]:
@@ -187,6 +222,7 @@ def load_task_runs(
             skipped.append({"task": result.eval_task, "reason": result.status_reason or ""})
             continue
         estimated, mismatches, category, risk = _task_facts(conn, result.task_id)
+        failures, reasoning, reasoning_output = _attempt_facts(conn, result.task_id)
         rows.append(
             TaskRun(
                 eval_task=result.eval_task,
@@ -205,6 +241,9 @@ def load_task_runs(
                 tags=tuple(result.tags or ()),
                 category=category,
                 risk=risk,
+                failures=failures,
+                reasoning_tokens=reasoning,
+                reasoning_output_tokens=reasoning_output,
             )
         )
     return rows, skipped
@@ -309,6 +348,7 @@ def strategy_metrics(
     solved = sum(r.solved for r in rows)
     cost = sum(r.cost_usd for r in rows)
     counterfactual = sum(r.counterfactual_usd for r in rows)
+    reasoning = sum(r.reasoning_tokens for r in rows)
     return StrategyMetrics(
         strategy=strategy,
         run_ids=[run.id for run in runs],
@@ -332,6 +372,9 @@ def strategy_metrics(
         success_ci=bootstrap(by_task, success_rate, seed, resamples),
         cost_per_solved_ci=bootstrap(by_task, cost_per_solved, seed, resamples),
         skipped=skipped,
+        failures={kind: sum(r.failures.get(kind, 0) for r in rows) for kind in FAILURE_KINDS},
+        reasoning_tokens=reasoning,
+        reasoning_share=_ratio(reasoning, sum(r.reasoning_output_tokens for r in rows)),
     )
 
 
@@ -511,6 +554,22 @@ def render_markdown(report: Report) -> str:
                 f" {m.escalations} | {m.wall_clock_s:.1f}s | {m.quota_wait_s:.1f}s |"
                 f" {_pct(m.estimated_cost_share)} | {m.model_mismatches} |"
                 f" {_usd(m.counterfactual_usd)} | {_signed_usd(m.savings_vs_counterfactual_usd)} |"
+            )
+        lines += [
+            "",
+            "### Attempt outcomes and reasoning",
+            "",
+            "Attempts, not task runs: an escalated task run counts once per attempt. Reasoning"
+            " share is over the output tokens of model calls that report reasoning tokens.",
+            "",
+            "| Strategy | " + " | ".join(f"`{kind}`" for kind in FAILURE_KINDS)
+            + " | Reasoning tokens | Reasoning share |",
+            "|---|" + "---|" * (len(FAILURE_KINDS) + 2),
+        ]
+        for m in section.strategies:
+            counts = " | ".join(str(m.failures[kind]) for kind in FAILURE_KINDS)
+            lines.append(
+                f"| {m.strategy} | {counts} | {m.reasoning_tokens} | {_pct(m.reasoning_share)} |"
             )
         partial = [(m.strategy, r) for m in section.strategies for r in m.partial_reasons]
         for strategy, reason in partial:

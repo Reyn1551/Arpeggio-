@@ -41,6 +41,7 @@ from arpeggio_ai.orchestrator.patch import (
     extract_patch,
     read_context,
     system_prompt,
+    truncation_reason,
 )
 from arpeggio_ai.safety.process import provider_key_names, scrubbed_env
 from arpeggio_ai.safety.secret_scan import (
@@ -128,6 +129,8 @@ def record_step(
         price_cache_hit_per_m=None if price is None else price.cache_hit_per_m,
         provider=event.provider,
         prompt_overhead_tokens=event.prompt_overhead_tokens,
+        finish_reason=event.finish_reason,
+        reasoning_tokens=event.reasoning_tokens,
     )
     if event.model_mismatch:
         set_model_mismatch(conn, spec.attempt_id, True)
@@ -304,7 +307,9 @@ async def run_patch_attempt(
     - The adapter stops early (guard, provider error, timeout): the attempt keeps that
       status, and the task is ``paused`` if the attempt paused, else ``failed``.
     - A patch that is missing, ambiguous, unsafe or does not apply: attempt ``error`` with
-      ``failure_reason``, task ``failed``.
+      ``failure_reason``, task ``failed``. If the reply stopped at the output limit, a
+      missing patch or one that does not apply is ``output_truncated`` instead. A truncated
+      reply whose patch applies goes on to the checks as usual.
     - Otherwise every criterion runs: all pass gives task ``awaiting_review``, any failure
       gives task ``failed``. The attempt is ``completed`` either way.
 
@@ -423,13 +428,14 @@ async def run_patch_attempt(
                 diff, tree.path, attempt_id=attempt.id, env=env, home=home, on_normalized=record
             )
         except PatchError as error:
+            reason, detail = truncation_reason(error, result.truncated)
             return _record_failure(
                 conn,
                 artifacts,
                 task_id=task_id,
                 attempt_id=attempt.id,
-                reason=error.reason,
-                detail=error.detail,
+                reason=reason,
+                detail=detail,
             )
 
         if prepare is not None:

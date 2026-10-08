@@ -39,7 +39,13 @@ from arpeggio_ai.evals.budget import (
     peak_notices,
     run_limit,
 )
-from arpeggio_ai.evals.report import DEFAULT_SEED, Report, build_report, render_markdown
+from arpeggio_ai.evals.report import (
+    DEFAULT_SEED,
+    FAILURE_KINDS,
+    Report,
+    build_report,
+    render_markdown,
+)
 from arpeggio_ai.evals.runner import EvalRunner, RunPlan, build_plan, config_hash, harness_sha
 from arpeggio_ai.evals.scaffold import DEFAULT_TEST_GLOBS, NewTask, scaffold
 from arpeggio_ai.evals.selfcheck import CheckRun, TaskCheck
@@ -633,6 +639,11 @@ def report_command(
                 f"${m.counterfactual_usd:.4f}",
             )
         out.print(table)
+        outcomes = Table("strategy", *FAILURE_KINDS, "reasoning share", title="attempt outcomes")
+        for m in section.strategies:
+            share = "n/a" if m.reasoning_share is None else f"{m.reasoning_share:.0%}"
+            outcomes.add_row(m.strategy, *(str(m.failures[k]) for k in FAILURE_KINDS), share)
+        out.print(outcomes)
         for p in section.paired:
             data = asdict(p)
             success = "n/a" if p.success_diff is None else f"{p.success_diff * 100:+.0f} pp"

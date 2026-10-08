@@ -480,3 +480,81 @@ def test_hidden_tests_of_an_eval_task_never_reach_the_prompt(e2e: E2E) -> None:
     assert "File `src/calc/ops.py`" in provider.bodies()[0]["messages"][1]["content"]
     refused = [e for e in e2e.log_events() if e.get("event") == "patch.context_refused_hidden_test"]
     assert len(refused) == 2
+
+
+# Output truncation (M0.6.1)
+
+
+def cut(content: str | None, finish: str = "length", reasoning: str = "") -> Any:
+    """A reply that stopped with ``finish``; reasoning goes to reasoning_content."""
+    response = ok(content or "")
+    body = response.json()
+    body["choices"][0]["finish_reason"] = finish
+    body["choices"][0]["message"] = {
+        "role": "assistant",
+        "content": content,
+        "reasoning_content": reasoning,
+    }
+    body["usage"]["completion_tokens_details"] = {"reasoning_tokens": 25}
+    return type(response)(200, json=body)
+
+
+def assert_unchanged_worktree(e2e: E2E, outcome: PatchAttemptOutcome) -> None:
+    worktree = e2e.attempt(outcome).worktree
+    assert worktree is not None
+    assert run_git(Path(worktree), "status", "--porcelain") == ""
+    assert run_git(Path(worktree), "rev-list", "--count", "HEAD") == run_git(
+        e2e.repo, "rev-list", "--count", "HEAD"
+    )
+
+
+def test_empty_truncated_reply_is_output_truncated(e2e: E2E) -> None:
+    outcome = e2e.run(FakeProvider(cut(None, reasoning="Let me think...")))
+    assert (outcome.attempt_status, outcome.task_status, outcome.failure_reason) == (
+        "error",
+        "failed",
+        "output_truncated",
+    )
+    model_call, failure = e2e.steps(outcome)[1:]
+    assert (model_call.finish_reason, model_call.reasoning_tokens) == ("length", 25)
+    assert failure.summary == "output_truncated: patch_missing: the reply has no ```diff block"
+    assert e2e.attempt(outcome).failure_reason == "output_truncated"
+
+
+@pytest.mark.parametrize(
+    ("finish", "reason"), [("length", "output_truncated"), ("stop", "patch_missing")]
+)
+def test_diff_only_in_reasoning_content_is_never_applied(
+    e2e: E2E, finish: str, reason: str
+) -> None:
+    outcome = e2e.run(FakeProvider(cut("", finish, reasoning=f"Draft:\n{FIX}\n")))
+    assert (outcome.attempt_status, outcome.failure_reason) == ("error", reason)
+    assert outcome.verdicts == []
+    assert_unchanged_worktree(e2e, outcome)
+
+
+def test_diff_cut_off_mid_fence_is_output_truncated(e2e: E2E) -> None:
+    partial = FIX.split("+    return", 1)[0].rstrip("\n").replace("```diff", "```diff", 1)
+    partial = partial.rsplit("\n", 1)[0]  # drop the last hunk line too
+    outcome = e2e.run(FakeProvider(cut(partial)))
+    assert outcome.failure_reason == "output_truncated"
+    failure = e2e.steps(outcome)[-1]
+    assert failure.summary is not None
+    assert failure.summary.startswith("output_truncated: patch_does_not_apply: ")
+    assert_unchanged_worktree(e2e, outcome)
+
+
+def test_truncated_reply_with_a_complete_diff_goes_to_the_checks(e2e: E2E) -> None:
+    outcome = e2e.run(FakeProvider(cut(f"Fixed.\n\n{FIX}\n")))
+    assert (outcome.attempt_status, outcome.task_status, outcome.failure_reason) == (
+        "completed",
+        "awaiting_review",
+        None,
+    )
+    assert [v.passed for v in outcome.verdicts] == [True, True]
+
+
+def test_truncation_does_not_hide_an_unsafe_patch(e2e: E2E) -> None:
+    reply = "```diff\n--- a/../x.py\n+++ b/../x.py\n@@ -1 +1 @@\n-a\n+b\n```"
+    outcome = e2e.run(FakeProvider(cut(reply)))
+    assert outcome.failure_reason == "patch_unsafe"

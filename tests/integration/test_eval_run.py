@@ -4,11 +4,13 @@ import sys
 from collections.abc import Iterator
 from pathlib import Path
 
+import httpx
 import pytest
 from fakes import deepseek_usage, ok, status
 from runkit import RunHarness, write_report
 
 from arpeggio_ai.evals.budget import BudgetError, check_estimate
+from arpeggio_ai.evals.feedback import TRUNCATED_HINT
 from arpeggio_ai.evals.runner import counterfactual_usd
 from arpeggio_ai.store.repositories import (
     get_task,
@@ -132,6 +134,30 @@ def test_max_three_attempts(h: RunHarness) -> None:
     run = next(r for r in list_eval_runs(h.conn) if r.strategy == "senior")
     (result,) = list_eval_results(h.conn, run.id)
     assert result.status_reason == "patch_missing"
+
+
+def truncated_reply(model: str, prompt: str) -> httpx.Response:
+    body = ok("", usage=deepseek_usage()).json()
+    body["choices"][0]["finish_reason"] = "length"
+    body["choices"][0]["message"]["reasoning_content"] = "thinking..."
+    return httpx.Response(200, json=body)
+
+
+def test_output_truncated_escalates_with_the_hint(h: RunHarness) -> None:
+    h.model.reply = truncated_reply
+    h.run(h.plan(ids=["sample-fix-add"], strategies=("senior",)))
+    assert results(h)["senior"]["sample-fix-add"] == ("failed", 3)
+    (result,) = list_eval_results(h.conn, list_eval_runs(h.conn)[0].id)
+    assert result.status_reason == "output_truncated"
+    assert result.task_id is not None
+    attempts = list_task_attempts(h.conn, result.task_id)
+    assert [a.failure_reason for a in attempts] == ["output_truncated"] * 3
+    prompts = [
+        next(m["content"] for m in body["messages"] if m["role"] == "user")
+        for body in h.model.requests
+    ]
+    assert TRUNCATED_HINT not in prompts[0]
+    assert f"Attempt 1 failed: output_truncated.\n{TRUNCATED_HINT}" in prompts[1]
 
 
 def test_escalated_prompt_has_the_failure_report(h: RunHarness) -> None:

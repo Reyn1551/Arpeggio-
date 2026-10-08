@@ -19,7 +19,7 @@ from arpeggio_ai.store.db import (
 )
 
 DOCS_SCHEMA = Path(__file__).parents[2] / "docs" / "04-DATA-MODEL.md"
-LATEST = 6
+LATEST = 7
 
 
 def names(conn: sqlite3.Connection, kind: str) -> set[str]:
@@ -477,7 +477,7 @@ def test_v5_database_with_eval_rows_upgrades_to_v6(tmp_path: Path) -> None:
     conn = v1_database(tmp_path / "arpeggio.db")
     try:
         migrate(conn, packaged_migrations()[:5])
-        assert migrate(conn) == [6]
+        assert migrate(conn, packaged_migrations()[:6]) == [6]
         run = conn.execute(
             "SELECT strategy, profile, status, status_reason, repeats, planned, estimate_usd"
             " FROM eval_runs WHERE id = 'E1'"
@@ -506,5 +506,19 @@ def test_v5_database_with_eval_rows_upgrades_to_v6(tmp_path: Path) -> None:
                 " attempts, duration_s, repeat_index) VALUES ('E1', 'web-001', 'T1', 0, 0, 0, 0, 1)"
             )
         assert conn.execute("PRAGMA foreign_key_check").fetchall() == []
+    finally:
+        conn.close()
+
+
+def test_v6_database_with_steps_upgrades_to_v7(tmp_path: Path) -> None:
+    conn = v1_database(tmp_path / "arpeggio.db")
+    try:
+        migrate(conn, packaged_migrations()[:6])
+        assert migrate(conn) == [7]
+        assert columns(conn, "steps")[-2:] == ["finish_reason", "reasoning_tokens"]
+        row = conn.execute(
+            "SELECT output_tokens, finish_reason, reasoning_tokens FROM steps WHERE id = 'S1'"
+        ).fetchone()
+        assert row[1:] == (None, None)
     finally:
         conn.close()

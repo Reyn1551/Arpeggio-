@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 
 from arpeggio_ai.evals.report import (
+    FAILURE_KINDS,
     Interval,
     TaskRun,
     bootstrap,
@@ -17,12 +18,15 @@ from arpeggio_ai.evals.report import (
 )
 from arpeggio_ai.store.repositories import (
     add_eval_result,
+    add_verdict,
     append_step,
     create_attempt,
     create_eval_run,
     create_task,
     finish_eval_run,
     register_repo,
+    set_attempt_status,
+    set_failure_reason,
     set_model_mismatch,
 )
 
@@ -300,3 +304,87 @@ def test_section_without_middle_warns(db: sqlite3.Connection, repo_id: str) -> N
     section = build_report(db, resamples=10).sections[0]
     assert section.paired == []
     assert any("no middle run" in w for w in section.warnings)
+
+
+def test_attempt_outcomes_and_reasoning_share(db: sqlite3.Connection, repo_id: str) -> None:
+    run = create_eval_run(
+        db,
+        strategy="senior",
+        split="holdout",
+        git_sha="x",
+        config_hash="h",
+        profile="micro",
+        repeats=1,
+        planned=1,
+        estimate_usd=1.0,
+    )
+    task = create_task(db, repo_id, "a", "r", profile="micro", source="eval")
+    # attempt -> (failure_reason, verdict passed, (output, reasoning) per model call)
+    plan: list[tuple[str | None, bool | None, list[tuple[int, int | None]]]] = [
+        ("output_truncated", None, [(4096, 4096)]),
+        ("output_truncated", None, [(4096, 4000)]),
+        ("patch_missing", None, [(100, None)]),  # reports no reasoning: left out of the share
+        ("patch_does_not_apply", None, [(300, 100)]),
+        (None, False, [(500, 300)]),  # checks_failed
+        (None, True, [(400, 0)]),  # solved: no failure kind
+        ("patch_unsafe", None, [(50, None)]),  # not a listed kind
+    ]
+    for reason, passed, calls in plan:
+        attempt = create_attempt(
+            db,
+            task.id,
+            adapter="api",
+            model="tier1.x",
+            effort="low",
+            verification="light",
+            route_reason={},
+        )
+        for output, reasoning in calls:
+            append_step(
+                db,
+                attempt.id,
+                "model_call",
+                output_tokens=output,
+                reasoning_tokens=reasoning,
+                finish_reason="length" if reason == "output_truncated" else "stop",
+                cost_usd=0.01,
+            )
+        if reason is not None:
+            set_failure_reason(db, attempt.id, reason)
+            set_attempt_status(db, attempt.id, "error")
+        else:
+            add_verdict(db, attempt.id, kind="check", passed=bool(passed))
+            set_attempt_status(db, attempt.id, "completed")
+    add_eval_result(
+        db,
+        run.id,
+        "a",
+        status="solved",
+        task_id=task.id,
+        cost_usd=0.07,
+        attempts=7,
+        duration_s=1.0,
+        escalations=6,
+        repeat_index=0,
+    )
+    finish_eval_run(db, run.id, "completed")
+    (section,) = build_report(db, resamples=50).sections
+    (senior,) = section.strategies
+    assert senior.failures == {
+        "output_truncated": 2,
+        "patch_missing": 1,
+        "patch_does_not_apply": 1,
+        "checks_failed": 1,
+    }
+    assert senior.reasoning_tokens == 4096 + 4000 + 100 + 300
+    assert senior.reasoning_share == pytest.approx(8496 / (4096 + 4096 + 300 + 500 + 400))
+    markdown = render_markdown(build_report(db, resamples=50))
+    assert "### Attempt outcomes and reasoning" in markdown
+    assert "| senior | 2 | 1 | 1 | 1 | 8496 | 90% |" in markdown
+
+
+def test_reasoning_share_is_na_without_reports(db: sqlite3.Connection, repo_id: str) -> None:
+    make_run(db, repo_id, "middle", MIDDLE)
+    (middle,) = build_report(db, resamples=50).sections[0].strategies
+    assert middle.reasoning_share is None and middle.reasoning_tokens == 0
+    assert middle.failures == dict.fromkeys(FAILURE_KINDS, 0)

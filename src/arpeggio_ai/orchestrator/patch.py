@@ -20,7 +20,9 @@ After applying, every touched ``crlf`` or ``lf`` file must still have that class
 (``patch_line_endings_changed`` otherwise; files without a line break always match).
 
 Failures raise ``PatchError`` with one of the reasons stored in
-``attempts.failure_reason``.
+``attempts.failure_reason``. ``truncation_reason`` turns ``patch_missing`` or
+``patch_does_not_apply`` into ``output_truncated`` when the reply stopped at the output
+limit; the other reasons stay as they are.
 """
 
 import fnmatch
@@ -48,7 +50,10 @@ FailureReason = Literal[
     "patch_mixed_line_endings",
     "patch_line_endings_changed",
     "patch_writes_redacted_placeholder",
+    "output_truncated",
 ]
+# Patch failures a reply cut off at the output limit explains (M0.6.1).
+TRUNCATION_EXPLAINS: frozenset[FailureReason] = frozenset({"patch_missing", "patch_does_not_apply"})
 Ending = Literal["crlf", "lf", "mixed"]
 MAX_PATCH_BYTES = 200 * 1024
 LINE_ENDING_SHARE = 0.95
@@ -71,6 +76,14 @@ class PatchError(ArpeggioError):
         super().__init__(f"{reason}: {detail}")
         self.reason: FailureReason = reason
         self.detail = detail
+
+
+def truncation_reason(error: PatchError, truncated: bool) -> tuple[FailureReason, str]:
+    """(reason, detail) to store. A truncated reply whose patch is missing or does not apply
+    is ``output_truncated``, and its detail keeps the original reason."""
+    if truncated and error.reason in TRUNCATION_EXPLAINS:
+        return "output_truncated", f"{error.reason}: {error.detail}"
+    return error.reason, error.detail
 
 
 def system_prompt() -> str:

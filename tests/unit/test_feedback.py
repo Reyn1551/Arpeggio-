@@ -2,8 +2,10 @@
 
 import pytest
 
+from arpeggio_ai.evals.budget import FEEDBACK_BASE_CHARS
 from arpeggio_ai.evals.feedback import (
     FEEDBACK_TAIL_CHARS,
+    TRUNCATED_HINT,
     FailedCheck,
     failure_report,
     output_may_show_hidden,
@@ -68,3 +70,14 @@ def test_patch_failure_report_has_no_checks() -> None:
     report = failure_report(2, "patch_does_not_apply", [], HIDDEN)
     assert report.splitlines()[0] == "Attempt 2 failed: patch_does_not_apply."
     assert "check" not in report.split("\n", 1)[1].replace("checks", "")
+
+
+def test_output_truncated_report_asks_for_short_reasoning() -> None:
+    report = failure_report(1, "output_truncated", [], HIDDEN)
+    assert report.splitlines()[:2] == ["Attempt 1 failed: output_truncated.", TRUNCATED_HINT]
+    assert len(report) <= FEEDBACK_BASE_CHARS
+
+
+def test_other_kinds_get_no_truncation_hint() -> None:
+    for kind in ("patch_missing", "checks_failed"):
+        assert TRUNCATED_HINT not in failure_report(1, kind, [], HIDDEN)

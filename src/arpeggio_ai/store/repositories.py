@@ -163,6 +163,8 @@ class Step:
     price_cache_hit_per_m: float | None
     provider: str | None
     prompt_overhead_tokens: int | None
+    finish_reason: str | None
+    reasoning_tokens: int | None
 
 
 def _require(field: str, value: str, allowed: Any) -> None:
@@ -589,6 +591,8 @@ def append_step(
     price_cache_hit_per_m: float | None = None,
     provider: str | None = None,
     prompt_overhead_tokens: int | None = None,
+    finish_reason: str | None = None,
+    reasoning_tokens: int | None = None,
 ) -> Step:
     """Record one step and add its tokens and cost to the attempt totals, atomically.
 
@@ -596,6 +600,8 @@ def append_step(
     or flat), its multiplier and the cache-hit input price. ``cost_usd`` is computed by the
     caller. ``actual_model`` is the model the provider says served the call (RTE-11).
     ``provider`` and ``prompt_overhead_tokens`` feed the spend guard (``max_prompt_overhead``).
+    ``finish_reason`` and ``reasoning_tokens`` are what the provider reported for a model
+    call; reasoning tokens are part of ``output_tokens``, not added to them.
     """
     _require("step kind", kind, StepKind)
     if price_window is not None:
@@ -604,6 +610,8 @@ def append_step(
         raise StoreError(f"price_multiplier must be > 0: {price_multiplier!r}")
     if prompt_overhead_tokens is not None and prompt_overhead_tokens < 0:
         raise StoreError(f"prompt_overhead_tokens must be >= 0: {prompt_overhead_tokens!r}")
+    if reasoning_tokens is not None and reasoning_tokens < 0:
+        raise StoreError(f"reasoning_tokens must be >= 0: {reasoning_tokens!r}")
     step_id = new_id()
     with transaction(conn):
         _get_attempt(conn, attempt_id)
@@ -612,8 +620,9 @@ def append_step(
             "INSERT INTO steps (id, attempt_id, seq, kind, summary, payload_ref, input_tokens,"
             " output_tokens, cached_tokens, price_in_per_m, price_out_per_m, cost_usd,"
             " cost_estimated, created_at, actual_model, price_window, price_multiplier,"
-            " price_cache_hit_per_m, provider, prompt_overhead_tokens)"
-            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            " price_cache_hit_per_m, provider, prompt_overhead_tokens, finish_reason,"
+            " reasoning_tokens)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 step_id,
                 attempt_id,
@@ -635,6 +644,8 @@ def append_step(
                 price_cache_hit_per_m,
                 provider,
                 prompt_overhead_tokens,
+                finish_reason,
+                reasoning_tokens,
             ),
         )
         conn.execute(
