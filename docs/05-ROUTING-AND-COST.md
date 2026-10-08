@@ -338,6 +338,7 @@ The key is `tier1`, `tier2` or `tier3`, a dot, then lowercase letters, digits, `
 | `provider_allow` | list | Optional. Every name must be a provider above |
 | `allow_training_providers` | bool | Optional. `true` lets this repo use providers whose `data_use` is `may_train` or `unknown`, `false` forbids it even if the global value is `true`. Unset means the global `[privacy]` value for `private` repos and `false` for `client` repos (SAF-07) |
 | `check_env` | list of strings | Default empty. Names of extra environment variables that done-criteria checks may see, on top of the fixed allowlist (`PATH`, `HOME`, temp and locale variables, and on Windows `USERPROFILE`, `SYSTEMROOT`, `COMSPEC`, `PATHEXT`). Each name is letters, digits and `_`, with no repeats. A variable that any provider's `api_key` references is never passed, even if listed (SAF-02) |
+| `secret_scan_allow` | list of strings | Default empty, at most 20. Regular expressions for secret-scanner findings that are not secrets, such as a documented test key. A finding stays unredacted when its matched text fully matches one. Each entry must compile, or the config is rejected. Findings of type `configured_key` and `private_key` are always redacted (SAF-02, see [07](07-SECURITY-AND-PRIVACY.md#secrets)) |
 
 ## Learned router (v2): contextual bandit
 

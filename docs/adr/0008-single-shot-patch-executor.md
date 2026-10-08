@@ -45,3 +45,29 @@ Every git command Arpeggio runs disables hooks, sets `core.autocrlf=false` and t
 ## Revisit when
 
 Agent adapters land (M1.1), or M0.6 shows that the diff format itself, rather than the models, limits success.
+
+## Amendment 2026-10-08: Windows process-tree kill
+
+### Context
+
+Patch mode runs checks that execute model-written code. M0.4 killed a timed-out check on Windows with `taskkill /T /F`, which walks the tree by parent PID. A grandchild whose parent had already exited was not reachable that way and kept running, still holding the check's output file. The owner works mainly on Windows, so this was an everyday gap.
+
+### Decision
+
+On Windows every check and every git command runs inside its own Job Object, created through `ctypes` (no new dependency):
+
+1. `CreateJobObjectW`, then `SetInformationJobObject` with `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`.
+2. The child starts with `CREATE_SUSPENDED | CREATE_NEW_PROCESS_GROUP` through the public `creationflags` argument.
+3. Arpeggio opens its own handle with `OpenProcess` on the child's PID, never through private `asyncio` or `subprocess` attributes. The PID cannot be reused at this point, because the `Popen` object still holds a handle to the process.
+4. `AssignProcessToJobObject`, then `NtResumeProcess` from `ntdll`.
+
+The start-to-assignment race is closed: the child runs no instruction before it is in the job, and the job does not allow breakaway, so every descendant lands in it too. `NtResumeProcess` is not in the Windows SDK documentation, but it is exported by `ntdll` and has been stable since Windows XP. The documented alternative, a Toolhelp32 thread snapshot plus `ResumeThread`, does the same in about 30 more lines.
+
+- On timeout or output limit: `TerminateJobObject`, then `CloseHandle`.
+- On a normal exit: if the job still has active processes, they are terminated and `process.stragglers_killed` is logged with their count. The handle is then closed, and kill-on-close would end anything left anyway.
+- If the job cannot be created or configured, the child starts normally and the old `taskkill /T /F` path is used. If the job refuses the assignment, the child is resumed outside it and the same fallback applies. Either way `process.job_object_unavailable` is logged once per Arpeggio process. If the child cannot be resumed it is terminated and the check fails to start.
+- POSIX is unchanged: a new session per check and a kill of its process group.
+
+### Residual risk
+
+A process created on the check's behalf by a Windows service, WMI (`Win32_Process.Create`) or Task Scheduler is not a descendant and is outside the job. Only the container sandbox (EXE-07) closes that. The fallback path still misses an orphaned grandchild.

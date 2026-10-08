@@ -915,3 +915,54 @@ def test_slow_but_complete_response_inside_the_deadline_succeeds(harness: Harnes
     slow = httpx.Response(200, stream=DripStream(chunks, delay_s=0.01))
     run = harness.run(FakeProvider(slow), timeout_s=5)
     assert (run.result.status, run.result.final_message) == ("completed", "Hello!")
+
+
+# 10. Secrets in outbound messages (SAF-02)
+
+AWS = "AKIA" + "Q7RZ3MX9KD2LPW5T"
+
+
+def test_outbound_messages_are_redacted_before_the_request(harness: Harness) -> None:
+    prompt = f"Use key {FAKE_KEY} and {AWS} please."
+    provider = FakeProvider(ok("first"), ok("second"))
+    run = harness.run(
+        provider, prompt=prompt, system=f"system {AWS}", follow_ups=[f"again {FAKE_KEY}"]
+    )
+    assert run.result.status == "completed"
+    first, second = (json.loads(request.content) for request in provider.requests)
+    assert [m["content"] for m in first["messages"]] == [
+        "system [REDACTED:aws_access_key]",
+        "Use key [REDACTED:configured_key] and [REDACTED:aws_access_key] please.",
+    ]
+    assert second["messages"][-1]["content"] == "again [REDACTED:configured_key]"
+    for path in artifacts_dir(harness.home).rglob("*"):
+        if path.is_file():
+            text = path.read_text("utf-8")
+            assert FAKE_KEY not in text and AWS not in text
+    events = [
+        json.loads(line)
+        for line in harness.log_text().splitlines()
+        if '"secret_scan.redacted"' in line
+    ]
+    sources = {event["source"]: event["types"] for event in events}
+    assert sources["message:user:0"] == {"aws_access_key": 1, "configured_key": 1}
+    assert sources["message:system"] == {"aws_access_key": 1}
+    assert sources["message:user:1"] == {"configured_key": 1}
+
+
+def test_guard_sizes_the_redacted_prompt(harness: Harness, monkeypatch: pytest.MonkeyPatch) -> None:
+    from arpeggio_ai.adapters import api
+
+    seen: list[int] = []
+    real = api.check_call
+
+    def spy(*args: Any, **kwargs: Any) -> Any:
+        seen.append(kwargs["prompt_chars"])
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(api, "check_call", spy)
+    secret = FAKE_KEY * 50  # a long secret makes the difference obvious
+    prompt = f"key {secret} end"
+    run = harness.run(FakeProvider(ok("done")), prompt=prompt, env={"DEEPSEEK_API_KEY": secret})
+    assert run.result.status == "completed"
+    assert seen == [len("key [REDACTED:configured_key] end")]

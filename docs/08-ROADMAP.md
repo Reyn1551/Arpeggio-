@@ -16,6 +16,7 @@ Goal: a store, one adapter, and a real baseline. Nothing smart yet.
 | M0.2.6 Decisions follow-up (done 2026-10-07) | Migration 0003 renames `tasks.deferrable` to `is_deferrable`, global `[privacy]` opt-in with repo and client precedence, `data_use` reminder in `init`, behavioral defaults stated in every template | SAF-07 (config part), NFR-12 |
 | M0.3 First adapter (done 2026-10-07) | Adapter protocol and registry, direct API adapter (OpenAI-compatible, non-streaming), pricing engine, spend guard, retry with backoff, cost and provenance recorded per step, opt-in live smoke test | EXE-01, CST-01, CST-02, CST-11, RTE-11, RTE-12 (retry part), BUD-02 (adapter part), CFG-10 |
 | M0.4 Worktrees + verifier (done 2026-10-08) | Worktree per attempt, done-criteria runner, verdicts, single-shot patch mode for the `api` adapter ([ADR-0008](adr/0008-single-shot-patch-executor.md)) | EXE-04, EXE-06 (per-check timeout), EXE-08, VER-01, VER-04, SAF-02 (check environment) |
+| M0.4.1 Hardening (done 2026-10-08) | Content secret scanner with redaction for outbound requests, artifacts and logs, `[repo] secret_scan_allow`, Windows Job Object for process-tree kill, CRLF-aware patch apply | SAF-02, NFR-06, EXE-06, EXE-08 |
 | M0.5 Eval suite | ≥ 20 real tasks with hidden tests, tuning/holdout split | EVL-01, EVL-02 |
 | M0.6 Baseline | Baseline for the `free` and `micro` profiles: `junior`, `middle`, `senior` strategies and a first comparison report per profile. Adds the `eval_per_month_usd` budget field that caps eval spend | EVL-03, EVL-06 |
 

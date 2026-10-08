@@ -13,6 +13,7 @@ only by its done criteria, never by the model's reply.
 import json
 import logging
 import sqlite3
+from collections import Counter
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -31,6 +32,7 @@ from arpeggio_ai.core.errors import StoreError
 from arpeggio_ai.core.ids import new_id
 from arpeggio_ai.core.logs import log_context
 from arpeggio_ai.orchestrator.patch import (
+    LineEndingPlan,
     PatchError,
     apply_patch,
     build_prompt,
@@ -39,6 +41,12 @@ from arpeggio_ai.orchestrator.patch import (
     system_prompt,
 )
 from arpeggio_ai.safety.process import provider_key_names, scrubbed_env
+from arpeggio_ai.safety.secret_scan import (
+    SecretScanner,
+    current_scanner,
+    scanner_from_config,
+    use_scanner,
+)
 from arpeggio_ai.safety.worktree import WorktreeError, create_worktree
 from arpeggio_ai.store.artifacts import ArtifactStore
 from arpeggio_ai.store.repositories import (
@@ -63,6 +71,9 @@ from arpeggio_ai.verify.runner import run_criteria
 
 log = logging.getLogger(__name__)
 
+RAW_PATCH_ARTIFACT = "patch-raw.diff"  # the diff as the model wrote it
+PATCH_ARTIFACT = "patch.diff"  # the diff after line-ending normalization, as applied
+
 
 def overhead_history(conn: sqlite3.Connection) -> Callable[[str, str], int]:
     """``AdapterContext.prompt_overhead`` backed by the last 20 recorded steps."""
@@ -80,11 +91,13 @@ def record_step(
     data = json.dumps(event.payload, ensure_ascii=False, indent=2, default=str).encode("utf-8")
     ref = artifacts.write(spec.task_id, spec.attempt_id, f"step-{new_id()}.json", data)
     price = event.price
+    # Redact before cutting, so a cut can never leave part of a secret in the row.
+    summary = current_scanner().redact(event.summary, "step:summary")
     step = append_step(
         conn,
         spec.attempt_id,
         event.kind,
-        summary=event.summary[:SUMMARY_MAX_CHARS],
+        summary=summary[:SUMMARY_MAX_CHARS],
         payload_ref=ref,
         input_tokens=event.input_tokens,
         output_tokens=event.output_tokens,
@@ -163,6 +176,7 @@ def _record_failure(
     detail: str,
 ) -> PatchAttemptOutcome:
     """Store why an attempt failed before verification and end it: attempt error, task failed."""
+    detail = current_scanner().redact(detail, "failure")  # before the summary cuts it
     ref = artifacts.write(task_id, attempt_id, f"failure-{new_id()}.txt", detail.encode("utf-8"))
     append_step(
         conn,
@@ -177,6 +191,77 @@ def _record_failure(
     set_task_status(conn, task_id, "failed")
     log.warning("attempt.failed", extra={"reason": reason})
     return PatchAttemptOutcome(attempt_id, "error", "failed", reason, [])
+
+
+def _scan_prompt_parts(
+    scanner: SecretScanner, request: str, context: Sequence[tuple[str, str]]
+) -> tuple[str, list[tuple[str, str]], Counter[str]]:
+    """Redact the task request and each context file on its own, so events name the file."""
+    counts: Counter[str] = Counter()
+    result = scanner.scan_logged(request, "task:request")
+    counts.update(result.counts())
+    clean: list[tuple[str, str]] = []
+    for path, text in context:
+        scanned = scanner.scan_logged(text, f"context:{path}")
+        counts.update(scanned.counts())
+        clean.append((path, scanned.text))
+    return result.text, clean, counts
+
+
+def _record_prompt(
+    conn: sqlite3.Connection,
+    artifacts: ArtifactStore,
+    *,
+    task_id: str,
+    attempt_id: str,
+    files: list[str],
+    redactions: Counter[str],
+) -> None:
+    """A ``message`` step saying which context went out and how much of it was redacted."""
+    total = sum(redactions.values())
+    types = dict(sorted(redactions.items()))
+    if total:
+        detail = ", ".join(f"{name}: {count}" for name, count in types.items())
+        redacted = f"{total} {'item' if total == 1 else 'items'} redacted ({detail})"
+    else:
+        redacted = "nothing redacted"
+    noun = "file" if len(files) == 1 else "files"
+    payload = {"context_files": files, "redacted": total, "types": types}
+    data = json.dumps(payload, indent=2).encode("utf-8")
+    ref = artifacts.write(task_id, attempt_id, f"prompt-{new_id()}.json", data)
+    summary = f"prompt: {len(files)} context {noun}, {redacted}"
+    append_step(
+        conn,
+        attempt_id,
+        "message",
+        summary=summary[:SUMMARY_MAX_CHARS],
+        payload_ref=ref,
+        cost_usd=0.0,
+    )
+
+
+def _record_patch(
+    conn: sqlite3.Connection,
+    artifacts: ArtifactStore,
+    *,
+    task_id: str,
+    attempt_id: str,
+    plan: LineEndingPlan,
+) -> None:
+    """Store the diff that is about to be applied and a ``message`` step pointing at it."""
+    ref = artifacts.write(task_id, attempt_id, PATCH_ARTIFACT, plan.diff.encode("utf-8"))
+    counts = Counter(plan.expected.values())
+    endings = ", ".join(f"{name}: {count}" for name, count in sorted(counts.items()))
+    noun = "file" if len(plan.expected) == 1 else "files"
+    summary = f"patch: {len(plan.expected)} {noun} (line endings {endings or 'none'})"
+    append_step(
+        conn,
+        attempt_id,
+        "message",
+        summary=summary[:SUMMARY_MAX_CHARS],
+        payload_ref=ref,
+        cost_usd=0.0,
+    )
 
 
 async def run_patch_attempt(
@@ -231,7 +316,8 @@ async def run_patch_attempt(
         provider_model=None if model is None else model.model,
     )
     set_task_status(conn, task_id, "routed")
-    with log_context(task_id=task_id, attempt_id=attempt.id):
+    scanner = scanner_from_config(config, context.env)
+    with log_context(task_id=task_id, attempt_id=attempt.id), use_scanner(scanner):
         try:
             tree = await create_worktree(
                 Path(repo.path),
@@ -254,7 +340,18 @@ async def run_patch_attempt(
         set_task_status(conn, task_id, "running")
 
         checks = [describe_criterion(row.parsed()) for row in criteria]
-        prompt = build_prompt(task.request, checks, read_context(tree.path, context_files))
+        request, context_texts, redactions = _scan_prompt_parts(
+            scanner, task.request, read_context(tree.path, context_files)
+        )
+        _record_prompt(
+            conn,
+            artifacts,
+            task_id=task_id,
+            attempt_id=attempt.id,
+            files=[path for path, _ in context_texts],
+            redactions=redactions,
+        )
+        prompt = build_prompt(request, checks, context_texts)
         spec = AttemptSpec(
             task_id=task_id,
             attempt_id=attempt.id,
@@ -282,7 +379,14 @@ async def run_patch_attempt(
 
         try:
             diff = extract_patch(result.final_message)
-            await apply_patch(diff, tree.path, attempt_id=attempt.id, env=env, home=home)
+            artifacts.write(task_id, attempt.id, RAW_PATCH_ARTIFACT, diff.encode("utf-8"))
+
+            def record(plan: LineEndingPlan) -> None:
+                _record_patch(conn, artifacts, task_id=task_id, attempt_id=attempt.id, plan=plan)
+
+            await apply_patch(
+                diff, tree.path, attempt_id=attempt.id, env=env, home=home, on_normalized=record
+            )
         except PatchError as error:
             return _record_failure(
                 conn,

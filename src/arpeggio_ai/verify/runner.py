@@ -4,7 +4,8 @@ An attempt is judged only by these checks, never by what the model says (VER-01)
 criterion runs, in stored order, even after a failure, so the verdicts show the whole
 picture (VER-04). Command output goes to an artifact ``check-<n>.log``, and the verdict
 keeps the exit code, duration, the timeout and output-limit flags and the last 2,000
-characters of output.
+characters of output. Output is redacted by the secret scanner before the tail is cut
+(NFR-06).
 """
 
 import logging
@@ -14,7 +15,7 @@ from pathlib import Path
 from typing import Any
 
 from arpeggio_ai.safety.process import ProcessError, run_process
-from arpeggio_ai.store.artifacts import ArtifactStore
+from arpeggio_ai.store.artifacts import ArtifactStore, redact_artifact
 from arpeggio_ai.store.repositories import Verdict, add_verdict, list_criteria
 from arpeggio_ai.verify.criteria import CommandCriterion, FileExistsCriterion
 
@@ -24,7 +25,7 @@ OUTPUT_TAIL_CHARS = 2000
 
 
 async def _run_command(
-    criterion: CommandCriterion, worktree: Path, env: Mapping[str, str]
+    criterion: CommandCriterion, worktree: Path, env: Mapping[str, str], log_name: str
 ) -> tuple[bool, dict[str, Any], bytes]:
     try:
         result = await run_process(
@@ -46,15 +47,17 @@ async def _run_command(
         and not result.output_limit_exceeded
         and result.exit_code == criterion.expect_exit
     )
+    # Redact once, before the tail is cut, so the verdict never holds part of a secret.
+    output = redact_artifact(log_name, result.output)
     detail = {
         "exit_code": result.exit_code,
         "expect_exit": criterion.expect_exit,
         "duration_s": result.duration_s,
         "timed_out": result.timed_out,
         "output_limit_exceeded": result.output_limit_exceeded,
-        "output_tail": result.text()[-OUTPUT_TAIL_CHARS:],
+        "output_tail": output.decode("utf-8", errors="replace")[-OUTPUT_TAIL_CHARS:],
     }
-    return passed, detail, result.output
+    return passed, detail, output
 
 
 def _file_exists(criterion: FileExistsCriterion, worktree: Path) -> tuple[bool, dict[str, Any]]:
@@ -84,8 +87,9 @@ async def run_criteria(
         criterion = row.parsed()
         log_ref = None
         if isinstance(criterion, CommandCriterion):
-            passed, detail, output = await _run_command(criterion, worktree, env)
-            log_ref = artifacts.write(task_id, attempt_id, f"check-{number}.log", output)
+            name = f"check-{number}.log"
+            passed, detail, output = await _run_command(criterion, worktree, env, name)
+            log_ref = artifacts.write(task_id, attempt_id, name, output)
         else:
             passed, detail = _file_exists(criterion, worktree)
         verdict = add_verdict(

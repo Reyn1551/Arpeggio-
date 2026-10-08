@@ -119,3 +119,57 @@ def test_context_files_skip_secrets_missing_and_oversize(tree: Worktree, home: P
         "big.txt": "over the 150-byte context cap",
         "bin.dat": "not UTF-8 text",
     }
+
+
+# Redaction placeholders in diffs (SAF-02)
+
+PLACEHOLDER_ADDED = """--- a/src/calc/ops.py
++++ b/src/calc/ops.py
+@@ -1,2 +1,3 @@
+ def add(a, b):
+-    return a - b
++    return a + b
++TOKEN = "[REDACTED:configured_key]"
+--- /dev/null
++++ b/src/calc/conf.py
+@@ -0,0 +1,2 @@
++NAME = "calc"
++KEY = "[REDACTED:aws_access_key]"
+"""
+
+
+def test_added_redaction_placeholder_is_rejected_and_not_applied(
+    tree: Worktree, home: Path
+) -> None:
+    error = failure(PLACEHOLDER_ADDED, tree, home)
+    assert error.reason == "patch_writes_redacted_placeholder"
+    assert error.detail == (
+        "added lines contain a [REDACTED:...] placeholder at src/calc/ops.py:3, src/calc/conf.py:2"
+    )
+    assert "TOKEN" not in error.detail and "KEY =" not in error.detail
+    assert run_git(tree.path, "status", "--porcelain") == ""
+    assert run_git(tree.path, "rev-parse", "HEAD") == tree.base_sha
+
+
+def test_placeholder_only_in_context_and_removed_lines_is_allowed(
+    tmp_path: Path, home: Path
+) -> None:
+    home.mkdir(parents=True, exist_ok=True)
+    text = 'NOTE = "[REDACTED:jwt] is how redaction looks"\nOLD = "[REDACTED:jwt]"\nX = 1\n'
+    repo = make_repo(tmp_path / "repo", {"doc.py": text})
+    tree = asyncio.run(
+        create_worktree(repo, home, task_id="01T", attempt_id="01A", attempt_seq=1, env=ENV)
+    )
+    diff = (
+        "--- a/doc.py\n+++ b/doc.py\n@@ -1,3 +1,2 @@\n"
+        ' NOTE = "[REDACTED:jwt] is how redaction looks"\n'
+        '-OLD = "[REDACTED:jwt]"\n'
+        " X = 1\n"
+    )
+    log_file = configure_logging(home / "logs")
+    apply(diff, tree, home)
+    assert (tree.path / "doc.py").read_text() == (
+        'NOTE = "[REDACTED:jwt] is how redaction looks"\nX = 1\n'
+    )
+    events = [json.loads(line)["event"] for line in log_file.read_text("utf-8").splitlines()]
+    assert "patch.touches_redacted_lines" in events

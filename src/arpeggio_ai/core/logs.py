@@ -7,8 +7,11 @@ rows in the database (OBS-03). Usage::
     with log_context(task_id=task.id, attempt_id=attempt.id):
         log.info("step.recorded", extra={"seq": 3, "cost_usd": 0.01})
 
-Extra fields with secret-looking names are written as ``[REDACTED]``. This is a safety net
-only. Never pass secrets or full prompts to the logger in the first place.
+Extra fields with secret-looking names are written as ``[REDACTED]``, and every string value
+(the event, extra fields, nested values, exception text) passes the secret scanner
+(NFR-06). A record with findings is preceded by a ``secret_scan.redacted`` line with counts
+per type. This is a safety net only. Never pass secrets or full prompts to the logger in
+the first place.
 """
 
 import json
@@ -22,6 +25,13 @@ from pathlib import Path
 from typing import Any
 
 from arpeggio_ai.core.clock import format_utc
+from arpeggio_ai.safety.secret_scan import (
+    Finding,
+    ScanResult,
+    SecretScanner,
+    current_scanner,
+    event_fields,
+)
 
 ROOT_LOGGER = "arpeggio_ai"
 REDACTED = "[REDACTED]"
@@ -74,7 +84,34 @@ class JsonFormatter(logging.Formatter):
         if record.exc_info and record.exc_info[1] is not None:
             entry["exc_type"] = type(record.exc_info[1]).__name__
             entry["exc"] = str(record.exc_info[1])
-        return json.dumps(entry, default=str)
+        source = f"log:{record.name}"
+        found: list[Finding] = []
+        clean = _scan_values(entry, current_scanner(), source, found)
+        line = json.dumps(clean)
+        if not found:
+            return line
+        # The event goes on its own line before the record, never through the logger, so
+        # formatting never re-enters a handler.
+        event = {key: entry[key] for key in ("ts", "task_id", "attempt_id")} | {
+            "level": "warning",
+            "logger": __name__,
+            "event": "secret_scan.redacted",
+        }
+        event |= event_fields(ScanResult("", tuple(found)), source)
+        return json.dumps(event) + "\n" + line
+
+
+def _scan_values(value: Any, scanner: SecretScanner, source: str, found: list[Finding]) -> Any:
+    """``value`` with every string in it scanned and redacted, as JSON-ready data."""
+    if isinstance(value, dict):
+        return {str(k): _scan_values(v, scanner, source, found) for k, v in value.items()}
+    if isinstance(value, list | tuple | set | frozenset):
+        return [_scan_values(item, scanner, source, found) for item in value]
+    if value is None or isinstance(value, bool | int | float):
+        return value
+    result = scanner.scan(value if isinstance(value, str) else str(value), source)
+    found.extend(result.findings)
+    return result.text
 
 
 class _JsonLinesHandler(logging.FileHandler):

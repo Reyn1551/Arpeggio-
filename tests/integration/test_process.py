@@ -241,3 +241,144 @@ def test_temp_output_is_deleted_when_the_process_cannot_start(
 def test_default_temp_limit_is_100_mb() -> None:
     assert process_module.MAX_TEMP_OUTPUT_BYTES == 100 * 1024 * 1024
     assert process_module.POLL_S == 0.5
+
+
+# Windows Job Object (EXE-06)
+
+windows_only = pytest.mark.skipif(sys.platform != "win32", reason="Job Objects are Windows only")
+
+# The parent starts a middle process that starts a grandchild and exits at once, so the
+# grandchild's parent is gone: taskkill /T cannot reach it by parent PID, a job can.
+ORPHAN_SCRIPT = """
+import subprocess, sys
+middle = (
+    "import subprocess, sys; "
+    "child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(120)']); "
+    "open(sys.argv[1], 'w').write(str(child.pid))"
+)
+subprocess.run([sys.executable, "-c", middle, sys.argv[1]], check=True)
+mode = sys.argv[2]
+if mode == "sleep":
+    import time
+    time.sleep(120)
+elif mode == "flood":
+    line = "x" * 999 + "\\n"
+    while True:
+        sys.stdout.write(line)
+"""
+
+
+def orphan(tmp_path: Path, mode: str, **kwargs: float) -> tuple[ProcessResult, int]:
+    script = tmp_path / "orphan.py"
+    script.write_text(ORPHAN_SCRIPT)
+    pid_file = tmp_path / "grandchild.pid"
+    result = run([PY, str(script), str(pid_file), mode], tmp_path, **kwargs)
+    assert pid_file.exists(), result.text()
+    return result, int(pid_file.read_text())
+
+
+@windows_only
+def test_job_kills_an_orphaned_grandchild_on_timeout(tmp_path: Path) -> None:
+    result, grandchild = orphan(tmp_path, "sleep", timeout_s=5)
+    assert result.timed_out
+    assert wait_gone(grandchild), "grandchild of an exited parent survived the timeout"
+
+
+@windows_only
+def test_job_kills_an_orphaned_grandchild_on_the_output_limit(
+    tmp_path: Path, out_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(process_module, "MAX_TEMP_OUTPUT_BYTES", 2 * 1024 * 1024)
+    monkeypatch.setattr(process_module, "POLL_S", 0.1)
+    result, grandchild = orphan(tmp_path, "flood", timeout_s=60)
+    assert result.output_limit_exceeded and not result.timed_out
+    assert wait_gone(grandchild), "grandchild survived the output limit"
+    assert list(out_dir.iterdir()) == []
+
+
+@windows_only
+def test_job_kills_stragglers_after_a_normal_exit(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    with caplog.at_level("WARNING", logger="arpeggio_ai.safety.process"):
+        result, grandchild = orphan(tmp_path, "exit", timeout_s=30)
+    assert (result.exit_code, result.timed_out) == (0, False)
+    assert wait_gone(grandchild), "background grandchild outlived the check"
+    [record] = [r for r in caplog.records if r.getMessage() == "process.stragglers_killed"]
+    assert record.__dict__["processes"] >= 1
+
+
+@windows_only
+def test_clean_exit_logs_no_stragglers(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
+    with caplog.at_level("WARNING", logger="arpeggio_ai.safety.process"):
+        result = run([PY, "-c", "print('ok')"], tmp_path)
+    assert result.exit_code == 0
+    assert [r for r in caplog.records if r.getMessage() == "process.stragglers_killed"] == []
+
+
+@windows_only
+def test_child_starts_inside_the_job(tmp_path: Path) -> None:
+    script = (
+        "import ctypes; r = ctypes.c_int(); "
+        "ctypes.windll.kernel32.IsProcessInJob(ctypes.c_void_p(-1), "
+        "None, ctypes.byref(r)); print(r.value)"
+    )
+    assert run([PY, "-c", script], tmp_path).text().strip() == "1"
+
+
+TREE_SCRIPT = """
+import subprocess, sys, time
+child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(120)"])
+open(sys.argv[1], "w").write(str(child.pid))
+time.sleep(120)
+"""
+
+
+@windows_only
+def test_without_a_job_taskkill_still_kills_the_direct_tree(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    def refuse() -> None:
+        process_module._job_unavailable("create", 5)  # what a refused CreateJobObjectW does
+        return None
+
+    monkeypatch.setattr(process_module, "_win_new_job", refuse)
+    monkeypatch.setattr(process_module, "_job_unavailable_logged", False)
+    script = tmp_path / "tree.py"
+    script.write_text(TREE_SCRIPT)
+    with caplog.at_level("WARNING", logger="arpeggio_ai.safety.process"):
+        first = run([PY, str(script), str(tmp_path / "child.pid")], tmp_path, timeout_s=3)
+        run([PY, "-c", "print(1)"], tmp_path)
+    assert first.timed_out
+    assert wait_gone(int((tmp_path / "child.pid").read_text())), "taskkill missed the child"
+    unavailable = [r for r in caplog.records if r.getMessage() == "process.job_object_unavailable"]
+    assert len(unavailable) == 1, "logged once per run"
+    assert unavailable[0].__dict__["fallback"] == "taskkill"
+
+
+@windows_only
+def test_refused_assignment_falls_back_and_still_runs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    monkeypatch.setattr(process_module._kernel32, "AssignProcessToJobObject", lambda *_: 0)
+    monkeypatch.setattr(process_module, "_job_unavailable_logged", False)
+    script = tmp_path / "tree.py"
+    script.write_text(TREE_SCRIPT)
+    with caplog.at_level("WARNING", logger="arpeggio_ai.safety.process"):
+        ran = run([PY, "-c", "print('ran')"], tmp_path)
+        killed = run([PY, str(script), str(tmp_path / "child.pid")], tmp_path, timeout_s=3)
+    assert (ran.exit_code, ran.text().strip()) == (0, "ran")  # resumed although not in a job
+    assert killed.timed_out
+    assert wait_gone(int((tmp_path / "child.pid").read_text())), "taskkill fallback missed it"
+    [record] = [r for r in caplog.records if r.getMessage() == "process.job_object_unavailable"]
+    assert record.__dict__["stage"] == "assign"
+
+
+def test_posix_never_creates_a_job(monkeypatch: pytest.MonkeyPatch) -> None:
+    if sys.platform == "win32":
+        job = process_module.create_job()
+        assert job is not None
+        job.close()
+        assert job.handle is None
+    else:
+        assert process_module.create_job() is None

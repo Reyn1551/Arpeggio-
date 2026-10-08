@@ -7,9 +7,11 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from fakes import FAKE_KEY
 
 from arpeggio_ai.core.logs import REDACTED, close_logging, configure_logging, log_context
 from arpeggio_ai.paths import logs_dir
+from arpeggio_ai.safety.secret_scan import SecretScanner, use_scanner
 from arpeggio_ai.store.repositories import create_attempt, create_task, ensure_repo
 
 log = logging.getLogger("arpeggio_ai.test")
@@ -140,3 +142,49 @@ def test_unconfigured_logging_is_silent(capfd: pytest.CaptureFixture[str]) -> No
     captured = capfd.readouterr()
     assert captured.out == ""
     assert captured.err == ""
+
+
+# Content secret scan (NFR-06)
+
+AWS = "AKIA" + "Q7RZ3MX9KD2LPW5T"
+
+
+def test_string_values_are_scanned(log_file: Path) -> None:
+    with use_scanner(SecretScanner(configured=[FAKE_KEY])):
+        log.warning(
+            "saw %s",
+            AWS,
+            extra={
+                "detail": f"key {FAKE_KEY} here",
+                "nested": {"items": [f"x {AWS}", 3, None]},
+                "path": Path(f"/tmp/{FAKE_KEY}"),
+            },
+        )
+    entries = lines(log_file)
+    event, record = entries
+    assert event["event"] == "secret_scan.redacted"
+    assert event["source"] == "log:arpeggio_ai.test"
+    assert event["types"] == {"aws_access_key": 2, "configured_key": 2}
+    assert event["redacted"] == 4
+    assert record["event"] == "saw [REDACTED:aws_access_key]"
+    assert record["detail"] == "key [REDACTED:configured_key] here"
+    assert record["nested"] == {"items": ["x [REDACTED:aws_access_key]", 3, None]}
+    raw = log_file.read_text(encoding="utf-8")
+    assert FAKE_KEY not in raw and AWS not in raw
+
+
+def test_exception_text_is_scanned(log_file: Path) -> None:
+    try:
+        raise ValueError(f"bad token {AWS}")
+    except ValueError:
+        log.exception("failed")
+    [event, record] = lines(log_file)
+    assert event["event"] == "secret_scan.redacted"
+    assert record["exc"] == "bad token [REDACTED:aws_access_key]"
+
+
+def test_clean_records_get_no_scan_event(log_file: Path) -> None:
+    log.info("plain", extra={"n": 1, "ok": True, "items": ("a", "b")})
+    [entry] = lines(log_file)
+    assert entry["event"] == "plain"
+    assert entry["items"] == ["a", "b"]
