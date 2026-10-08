@@ -264,7 +264,9 @@ def test_overhead_alert_of_one_is_accepted(config_data: dict[str, Any]) -> None:
 
 
 def as_free_profile(data: dict[str, Any]) -> dict[str, Any]:
-    data["budget"].update(profile="free", per_task_usd=0, per_day_usd=0, per_month_usd=0)
+    data["budget"].update(
+        profile="free", per_task_usd=0, per_day_usd=0, per_month_usd=0, eval_per_month_usd=0
+    )
     for spec in data["models"].values():
         spec.update(free=True, price_in_per_m=0.0, price_out_per_m=0.0)
     return data
@@ -312,6 +314,7 @@ def test_free_profile_requires_zero_budgets(config_data: dict[str, Any]) -> None
         "budget.per_task_usd": "must be 0 under profile 'free'",
         "budget.per_day_usd": "must be 0 under profile 'free'",
         "budget.per_month_usd": "must be 0 under profile 'free'",
+        "budget.eval_per_month_usd": "must be 0 under profile 'free'",
     }
 
 
@@ -598,3 +601,29 @@ def test_config_model_validate_still_raises_validation_error(config_data: dict[s
     config_data["budget"]["per_task_usd"] = -1
     with pytest.raises(ValidationError):
         Config.model_validate(config_data)
+
+
+def test_eval_budget_is_optional_and_not_negative(config_data: dict[str, Any]) -> None:
+    del config_data["budget"]["eval_per_month_usd"]
+    assert parse_config(config_data).budget.eval_per_month_usd is None
+    config_data["budget"]["eval_per_month_usd"] = -1.0
+    assert "budget.eval_per_month_usd" in fields(config_data)
+
+
+def test_free_profile_allows_zero_or_unset_eval_budget(config_data: dict[str, Any]) -> None:
+    as_free_profile(config_data)
+    assert parse_config(config_data).budget.eval_per_month_usd == 0
+    del config_data["budget"]["eval_per_month_usd"]
+    assert parse_config(config_data).budget.eval_per_month_usd is None
+
+
+def test_evals_middle_map_must_name_known_models(config_data: dict[str, Any]) -> None:
+    config_data["evals"] = {"middle": {"docs": "tier1.cheap", "bugfix": "tier9.nope"}}
+    assert "evals.middle.bugfix" in fields(config_data)
+    config_data["evals"] = {"middle": {"docs": "tier1.cheap", "bugfix": "tier2.missing"}}
+    assert fields(config_data) == {"evals.middle.bugfix": "unknown model 'tier2.missing'"}
+    config_data["evals"] = {"middle": {"cooking": "tier1.cheap"}}
+    assert any(key.startswith("evals.middle") for key in fields(config_data))
+    config_data["evals"] = {"middle": {"docs": "tier1.cheap"}, "max_tokens": 4096}
+    evals = parse_config(config_data).evals
+    assert (evals.middle, evals.max_tokens) == ({"docs": "tier1.cheap"}, 4096)

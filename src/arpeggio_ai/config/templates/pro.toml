@@ -18,6 +18,7 @@ per_month_usd  = 300.00
 overhead_alert = 0.10
 reserve_usd    = 0.10        # only used by the micro profile
 max_quota_wait_s = 120
+eval_per_month_usd = 30.00  # cap for eval runs per UTC month (arpeggio eval run)
 
 # data_use stays "unknown" until you have read each provider's terms.
 [providers.anthropic]

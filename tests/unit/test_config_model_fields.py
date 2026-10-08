@@ -243,7 +243,9 @@ def test_duplicate_aliases_are_rejected(config_data: dict[str, Any], mid: dict[s
 
 
 def free_budget(data: dict[str, Any]) -> dict[str, Any]:
-    data["budget"].update(profile="free", per_task_usd=0, per_day_usd=0, per_month_usd=0)
+    data["budget"].update(
+        profile="free", per_task_usd=0, per_day_usd=0, per_month_usd=0, eval_per_month_usd=0
+    )
     return data
 
 

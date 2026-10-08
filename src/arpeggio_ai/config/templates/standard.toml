@@ -21,6 +21,7 @@ per_month_usd  = 150.00
 overhead_alert = 0.10        # alert if Arpeggio's own overhead exceeds 10% of spend
 reserve_usd    = 0.10        # only used by the micro profile
 max_quota_wait_s = 120       # wait this long for a quota reset before switching route
+eval_per_month_usd = 15.00     # cap for eval runs per UTC month (arpeggio eval run)
 
 # Providers. api_key names where the key lives: an environment variable
 # ("env:NAME") or an OS keychain entry ("keychain:NAME"). A pasted key fails

@@ -69,6 +69,7 @@ prepaid_balance_usd = 2.00      # required under "micro"
 reserve_usd         = 0.10      # micro only; never spend below this
 overhead_alert      = 0.10
 max_quota_wait_s    = 120
+eval_per_month_usd  = 0.50      # cap for eval runs per UTC month (arpeggio eval run)
 
 [providers.deepseek]
 kind      = "openai_compatible"         # anthropic | openai_compatible
@@ -284,6 +285,7 @@ The validation contract for `config.toml` (CFG-02 to CFG-10). Unknown fields are
 | `reserve_usd` | float | Default 0.10. Under `micro` it must be below `prepaid_balance_usd`, and Arpeggio never spends below it (BUD-03) |
 | `overhead_alert` | float | `0 < x <= 1`, default 0.10 |
 | `max_quota_wait_s` | int | `>= 0`, default 120 (QTA-03) |
+| `eval_per_month_usd` | float | Optional, `>= 0`. Cap on eval run spend per UTC month: costs of attempts linked to eval results ([06](06-EVALUATION.md#baseline-experiment-four-strategies)). Must be 0 (or unset) under `free`. Unset means every `eval run` needs `--max-usd`. The packaged templates set it explicitly |
 
 ### `[providers.<name>]`
 
@@ -335,6 +337,8 @@ The key is `tier1`, `tier2` or `tier3`, a dot, then lowercase letters, digits, `
 | Field | Type | Rule |
 |---|---|---|
 | `dir` | string | Optional, an absolute path (`~` is expanded). Where the personal eval suite lives. Unset means `<ARPEGGIO_HOME>/evals`, and the `ARPEGGIO_EVALS_DIR` environment variable overrides both ([06](06-EVALUATION.md#where-the-suite-lives)) |
+| `max_tokens` | int | Default 8192, `>= 1`. Output cap per model call in eval runs. It is also the output side of the worst-case estimate, so a lower value lowers the estimate |
+| `middle` | table | Optional. Overrides of the `middle` strategy's map, `category = "model_key"`, for example `docs = "tier1.flash"`. Categories are the eval task categories, and every model key must exist ([06](06-EVALUATION.md#baseline-experiment-four-strategies)) |
 
 ### `[repo]` (only in `<repo>/.arpeggio/config.toml`)
 

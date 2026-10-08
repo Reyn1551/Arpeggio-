@@ -87,19 +87,21 @@ def _read_into(path: Path, issues: list[ConfigIssue]) -> dict[str, Any] | None:
     return raw
 
 
-def load_config(repo: Path | None = None) -> Config:
+def load_config(repo: Path | None = None, *, global_path: Path | None = None) -> Config:
     """Load the global config, deep-merge the repo config over it if present, and validate.
 
-    Raises ConfigError listing every issue found, each with file, dotted field and message.
+    ``global_path`` replaces ``<home>/config.toml`` (``eval run --config``). The file is
+    only read, never written. Raises ConfigError listing every issue found, each with file,
+    dotted field and message.
     """
-    global_path = global_config_path()
+    explicit = global_path is not None
+    global_path = global_config_path() if global_path is None else global_path.expanduser()
     if not global_path.exists():
+        hint = "" if explicit else " Run `arpeggio init` to create it."
         raise ConfigError(
             [
                 ConfigIssue(
-                    file=str(global_path),
-                    field=None,
-                    message="config file not found. Run `arpeggio init` to create it.",
+                    file=str(global_path), field=None, message=f"config file not found.{hint}"
                 )
             ]
         )

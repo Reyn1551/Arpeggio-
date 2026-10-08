@@ -34,6 +34,9 @@ ProviderKind = Literal["anthropic", "openai_compatible"]
 PrivacyClass = Literal["public", "private", "client"]
 BudgetProfile = Literal["free", "micro", "standard", "pro"]
 DataUse = Literal["no_training", "may_train", "unknown"]
+TaskCategory = Literal[
+    "feature", "bugfix", "refactor", "docs", "config", "data_pipeline", "ml_experiment", "other"
+]
 
 ProviderName = Annotated[str, StringConstraints(pattern=r"^[a-z][a-z0-9_-]*$")]
 ModelKey = Annotated[str, StringConstraints(pattern=r"^tier[1-3]\.[a-z0-9_-]+$")]
@@ -154,6 +157,8 @@ class Budget(_Model):
     reserve_usd: float = Field(default=0.10, ge=0)
     overhead_alert: float = Field(default=0.10, gt=0, le=1)
     max_quota_wait_s: int = Field(default=120, ge=0)
+    # Monthly cap for eval runs (M0.6). None means eval runs need --max-usd.
+    eval_per_month_usd: float | None = Field(default=None, ge=0)
 
     @model_validator(mode="after")
     def _check_profile_rules(self) -> Self:
@@ -167,6 +172,8 @@ class Budget(_Model):
             ]
             if self.prepaid_balance_usd is not None:
                 problems.append((("prepaid_balance_usd",), "not allowed under profile 'free'"))
+            if self.eval_per_month_usd:
+                problems.append((("eval_per_month_usd",), "must be 0 under profile 'free'"))
         else:
             problems += [
                 ((name,), f"must be > 0 under profile '{self.profile}'")
@@ -387,6 +394,10 @@ class EvalsSettings(_Model):
     # Absolute path of the personal eval suite. None means <home>/evals. ARPEGGIO_EVALS_DIR
     # overrides it.
     dir: str | None = None
+    # Output cap per model call in eval runs (``max_tokens``). Part of the cost estimate.
+    max_tokens: int = Field(default=8192, ge=1)
+    # Overrides of the `middle` strategy's map: category -> model key (EVL-03).
+    middle: dict[TaskCategory, ModelKey] = Field(default_factory=dict)
 
     @field_validator("dir")
     @classmethod
@@ -471,6 +482,10 @@ class Config(_Model):
             if endpoint in endpoints:
                 problems.append((("providers", name), DUPLICATE_PROVIDER_MESSAGE))
             endpoints.add(endpoint)
+
+        for category, key in self.evals.middle.items():
+            if key not in self.models:
+                problems.append((("evals", "middle", category), f"unknown model '{key}'"))
 
         for index, name in enumerate(self.repo.provider_allow or []):
             if name not in self.providers:

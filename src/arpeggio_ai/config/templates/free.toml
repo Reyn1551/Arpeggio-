@@ -21,6 +21,7 @@ per_month_usd    = 0
 reserve_usd      = 0.10  # only used by the micro profile
 overhead_alert   = 0.10  # alert if Arpeggio's own overhead exceeds 10% of spend
 max_quota_wait_s = 120   # wait this long for a quota reset before switching route or pausing
+eval_per_month_usd = 0   # cap for eval runs (arpeggio eval run), 0 under "free"
 
 # Gemini API free tier, OpenAI-compatible endpoint.
 # Limits: https://ai.google.dev/gemini-api/docs/rate-limits (see your own in AI Studio)
