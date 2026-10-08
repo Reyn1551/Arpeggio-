@@ -173,3 +173,64 @@ def test_placeholder_only_in_context_and_removed_lines_is_allowed(
     )
     events = [json.loads(line)["event"] for line in log_file.read_text("utf-8").splitlines()]
     assert "patch.touches_redacted_lines" in events
+
+
+# Path grounding (M0.7)
+
+
+def edit(path: str, old: str = "a", new: str = "b", *, git_header: bool = True) -> str:
+    header = f"diff --git a/{path} b/{path}\n" if git_header else ""
+    return f"{header}--- a/{path}\n+++ b/{path}\n@@ -1 +1 @@\n-{old}\n+{new}\n"
+
+
+@pytest.mark.parametrize(
+    "diff",
+    [
+        edit("src/calc/invented.py"),
+        edit("src/calc/invented.py", git_header=False),
+        edit("src/Calc/ops.py"),  # a case Windows would resolve; git ls-files does not
+        "diff --git a/gone.py b/gone.py\ndeleted file mode 100644\n--- a/gone.py\n+++ /dev/null\n"
+        "@@ -1 +0,0 @@\n-a\n",
+    ],
+)
+def test_modifying_a_path_missing_at_base_is_unknown(tree: Worktree, home: Path, diff: str) -> None:
+    error = failure(diff, tree, home)
+    assert error.reason == "patch_unknown_path"
+    assert "not in the base commit" in error.detail
+    assert run_git(tree.path, "status", "--porcelain") == ""
+    assert run_git(tree.path, "rev-parse", "HEAD") == tree.base_sha
+
+
+def test_an_unknown_path_is_named_and_known_paths_are_not(tree: Worktree, home: Path) -> None:
+    diff = extract_patch(FIX) + edit("docs/invented.md")
+    error = failure(diff, tree, home)
+    assert error.reason == "patch_unknown_path"
+    assert "docs/invented.md" in error.detail and "src/calc/ops.py" not in error.detail
+
+
+def test_a_declared_new_file_is_not_unknown(tree: Worktree, home: Path) -> None:
+    diff = (
+        "diff --git a/src/calc/brand_new.py b/src/calc/brand_new.py\nnew file mode 100644\n"
+        "--- /dev/null\n+++ b/src/calc/brand_new.py\n@@ -0,0 +1 @@\n+VALUE = 2\n"
+    )
+    apply(diff, tree, home)
+    assert (tree.path / "src" / "calc" / "brand_new.py").read_text() == "VALUE = 2\n"
+
+
+def test_a_path_only_in_the_main_repo_is_unknown_at_base(tmp_path: Path, home: Path) -> None:
+    home.mkdir(parents=True, exist_ok=True)
+    repo = make_repo(tmp_path / "repo")
+    base = run_git(repo, "rev-parse", "HEAD")
+    (repo / "later.py").write_text("a\n", encoding="utf-8")
+    run_git(repo, "add", "later.py")
+    run_git(repo, "commit", "-q", "-m", "later")
+    (repo / "untracked.py").write_text("a\n", encoding="utf-8")
+    tree = asyncio.run(
+        create_worktree(
+            repo, home, task_id="01T", attempt_id="01A", attempt_seq=1, env=ENV, base=base
+        )
+    )
+    for path in ("later.py", "untracked.py"):
+        error = failure(edit(path), tree, home)
+        assert (error.reason, path in error.detail) == ("patch_unknown_path", True)
+    assert run_git(tree.path, "rev-parse", "HEAD") == base

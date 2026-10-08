@@ -183,7 +183,11 @@ def test_build_prompt() -> None:
     assert prompt.startswith("Task:\nFix add.\n\nChecks that must pass")
     assert "1. The command `pytest` exits with code 0." in prompt
     assert "File `src/calc/ops.py`:\n````\ndef add(a, b):" in prompt
+    assert "Files you may modify, with these exact paths:\n- src/calc/ops.py\n" in prompt
+    assert "Modify only these files. Create a new file only when the task needs one." in prompt
+    assert prompt.index("Files you may modify") < prompt.index("File `src/calc/ops.py`")
     assert "Files from the repository" not in build_prompt("x", [], [])
+    assert "Files you may modify" not in build_prompt("x", [], [])
     assert "Previous attempt" not in prompt
 
 
@@ -191,3 +195,60 @@ def test_build_prompt_appends_feedback_last() -> None:
     prompt = build_prompt("Fix add.", ["a", "b"], [], "Attempt 1 failed: checks_failed.")
     assert "1. a\n2. b" in prompt
     assert prompt.endswith("Previous attempt:\nAttempt 1 failed: checks_failed.\n")
+
+
+# Header consistency (M0.7)
+
+REVERSED = SIMPLE.replace(
+    "diff --git a/src/calc/ops.py b/src/calc/ops.py",
+    "diff --git b/src/calc/ops.py a/src/calc/ops.py",
+)
+
+
+def test_a_reversed_git_header_is_malformed(tmp_path: Path) -> None:
+    kind, detail = reason(REVERSED, tmp_path)
+    assert kind == "patch_malformed"
+    assert detail == (
+        "diff --git needs a/<path> b/<path>, got b/src/calc/ops.py and a/src/calc/ops.py"
+    )
+
+
+@pytest.mark.parametrize(
+    "diff",
+    [
+        SIMPLE.replace(" b/src/calc/ops.py\n", " b/src/calc/other.py\n", 1),
+        SIMPLE.replace("+++ b/src/calc/ops.py", "+++ b/src/calc/other.py"),
+        SIMPLE.replace("--- a/src/calc/ops.py", "--- a/src/calc/other.py"),
+        "--- a/src/calc/ops.py\n+++ b/src/calc/other.py\n@@ -1 +1 @@\n-a\n+b\n",
+    ],
+)
+def test_a_and_b_paths_naming_different_files_are_malformed(tmp_path: Path, diff: str) -> None:
+    kind, detail = reason(diff, tmp_path)
+    assert kind == "patch_malformed"
+    assert detail == (
+        "the a/ and b/ paths name different files: src/calc/ops.py and src/calc/other.py"
+    )
+
+
+@pytest.mark.parametrize(
+    "diff",
+    [
+        SIMPLE,
+        SIMPLE.replace("\n", "\r\n"),
+        "diff --git a/old.py b/new.py\nsimilarity index 90%\nrename from old.py\nrename to new.py\n"
+        "--- a/old.py\n+++ b/new.py\n@@ -1 +1 @@\n-a\n+b\n",
+        "diff --git a/old.py b/copy.py\ncopy from old.py\ncopy to copy.py\n",
+        "diff --git a/new.py b/new.py\nnew file mode 100644\n--- /dev/null\n+++ b/new.py\n"
+        "@@ -0,0 +1 @@\n+a\n",
+        "diff --git a/gone.py b/gone.py\ndeleted file mode 100644\n--- a/gone.py\n+++ /dev/null\n"
+        "@@ -1 +0,0 @@\n-a\n",
+        "--- a/x.py\t2026-10-08 10:00:00\n+++ b/x.py\t2026-10-08 10:01:00\n@@ -1 +1 @@\n-a\n+b\n",
+    ],
+)
+def test_consistent_headers_pass(tmp_path: Path, diff: str) -> None:
+    validate_patch(diff, tmp_path)
+
+
+def test_unsafe_paths_win_over_malformed_headers(tmp_path: Path) -> None:
+    diff = "--- a/../x.py\n+++ b/src/x.py\n@@ -1 +1 @@\n-a\n+b\n"
+    assert reason(diff, tmp_path)[0] == "patch_unsafe"

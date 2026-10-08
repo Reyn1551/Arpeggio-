@@ -14,6 +14,7 @@ from gitrepo import FILES, FIX, WRONG_FIX, make_repo, run_git, snapshot
 from arpeggio_ai.adapters.base import Route
 from arpeggio_ai.config.models import Config
 from arpeggio_ai.core.logs import configure_logging
+from arpeggio_ai.evals.report import FAILURE_KINDS, build_report, prompt_redactions, render_markdown
 from arpeggio_ai.evals.task import EvalTask
 from arpeggio_ai.orchestrator.attempts import (
     PatchAttemptOutcome,
@@ -27,7 +28,10 @@ from arpeggio_ai.store.repositories import (
     Attempt,
     Step,
     add_criterion,
+    add_eval_result,
+    create_eval_run,
     create_task,
+    finish_eval_run,
     get_attempt,
     get_task,
     list_steps,
@@ -170,6 +174,7 @@ def test_prompt_carries_task_checks_context_and_system_message(e2e: E2E) -> None
     assert user["content"].startswith("Task:\nMake calc.add add.")
     assert "tests/test_calc.py` exits with code 0." in user["content"]
     assert "File `src/calc/ops.py`:\n````\ndef add(a, b):\n    return a - b" in user["content"]
+    assert "Files you may modify, with these exact paths:\n- src/calc/ops.py\n" in user["content"]
     assert body["max_tokens"] == 256
 
 
@@ -212,6 +217,18 @@ def test_model_claiming_success_without_a_diff_is_not_believed(e2e: E2E) -> None
             "```diff\n--- a/src/calc/ops.py\n+++ b/src/calc/ops.py\n@@ -1,2 +1,2 @@\n"
             " def add(x, y):\n-    return x - y\n+    return x + y\n```",
             "patch_does_not_apply",
+        ),
+        (
+            "```diff\n--- a/src/calc/invented.py\n+++ b/src/calc/invented.py\n@@ -1 +1 @@\n"
+            "-a\n+b\n```",
+            "patch_unknown_path",
+        ),
+        (
+            FIX.replace(
+                "diff --git a/src/calc/ops.py b/src/calc/ops.py",
+                "diff --git b/src/calc/ops.py a/src/calc/ops.py",
+            ),
+            "patch_malformed",
         ),
     ],
 )
@@ -558,3 +575,155 @@ def test_truncation_does_not_hide_an_unsafe_patch(e2e: E2E) -> None:
     reply = "```diff\n--- a/../x.py\n+++ b/../x.py\n@@ -1 +1 @@\n-a\n+b\n```"
     outcome = e2e.run(FakeProvider(cut(reply)))
     assert outcome.failure_reason == "patch_unsafe"
+
+
+# Hunk recount (M0.7)
+
+MISCOUNTED_FIX = FIX.replace("@@ -1,2 +1,2 @@", "@@ -1,3 +1,4 @@")
+
+
+def test_wrong_hunk_counts_with_correct_content_apply(e2e: E2E) -> None:
+    outcome = e2e.run(FakeProvider(ok(f"Fixed.\n\n{MISCOUNTED_FIX}\n")))
+    assert (outcome.attempt_status, outcome.task_status, outcome.failure_reason) == (
+        "completed",
+        "awaiting_review",
+        None,
+    )
+    attempt = e2e.attempt(outcome)
+    raw = e2e.artifacts.read(f"{e2e.task.id}/{attempt.id}/patch-raw.diff").decode("utf-8")
+    applied = e2e.artifacts.read(f"{e2e.task.id}/{attempt.id}/patch.diff").decode("utf-8")
+    assert "@@ -1,3 +1,4 @@" in raw
+    assert "@@ -1,2 +1,2 @@" in applied and "@@ -1,3 +1,4 @@" not in applied
+    assert len(raw.splitlines()) == len(applied.splitlines())
+    [event] = [e for e in e2e.log_events() if e.get("event") == "patch.hunks_recounted"]
+    assert event["hunks"] == 1
+    assert "return" not in json.dumps(event)  # a count, never content
+
+
+def test_a_correct_diff_is_not_reported_as_recounted(e2e: E2E) -> None:
+    outcome = e2e.run(FakeProvider(ok(FIX)))
+    assert outcome.task_status == "awaiting_review"
+    assert not [e for e in e2e.log_events() if e.get("event") == "patch.hunks_recounted"]
+
+
+def test_wrong_hunk_counts_in_a_truncated_reply_are_not_recounted(e2e: E2E) -> None:
+    outcome = e2e.run(FakeProvider(cut(f"Fixed.\n\n{MISCOUNTED_FIX}\n")))
+    assert (outcome.attempt_status, outcome.failure_reason) == ("error", "output_truncated")
+    failure = e2e.steps(outcome)[-1]
+    assert failure.summary is not None
+    assert failure.summary.startswith("output_truncated: patch_does_not_apply: ")
+    attempt = e2e.attempt(outcome)
+    applied = e2e.artifacts.read(f"{e2e.task.id}/{attempt.id}/patch.diff").decode("utf-8")
+    assert "@@ -1,3 +1,4 @@" in applied
+    assert not [e for e in e2e.log_events() if e.get("event") == "patch.hunks_recounted"]
+    assert_unchanged_worktree(e2e, outcome)
+
+
+def test_a_reply_without_finish_reason_is_not_recounted(e2e: E2E) -> None:
+    response = ok(MISCOUNTED_FIX)
+    body = response.json()
+    del body["choices"][0]["finish_reason"]
+    outcome = e2e.run(FakeProvider(type(response)(200, json=body)))
+    assert outcome.failure_reason == "patch_does_not_apply"
+
+
+def test_a_body_line_that_is_not_a_diff_line_is_still_rejected(e2e: E2E) -> None:
+    reply = MISCOUNTED_FIX.replace("-    return a - b", "*    return a - b")
+    outcome = e2e.run(FakeProvider(ok(reply)))
+    assert (outcome.attempt_status, outcome.failure_reason) == ("error", "patch_malformed")
+    assert_unchanged_worktree(e2e, outcome)
+
+
+def test_unsafe_paths_are_still_rejected_with_wrong_counts(e2e: E2E) -> None:
+    reply = "```diff\n--- a/../x.py\n+++ b/../x.py\n@@ -1,4 +1,7 @@\n-a\n+b\n```"
+    outcome = e2e.run(FakeProvider(ok(reply)))
+    assert outcome.failure_reason == "patch_unsafe"
+
+
+# Redaction metric wiring (M0.7): context -> prompt step -> eval report
+
+# Clearly fake: 40 characters after gsk_ that spell out that they are a test value.
+FAKE_GROQ_KEY = "gsk_" + "FAKEtestKEYnotREAL0123456789abcdefGHIJKL"
+
+
+@pytest.mark.parametrize(
+    ("secret", "env", "kind"),
+    [
+        (LEAK_KEY, {"DEEPSEEK_API_KEY": LEAK_KEY}, "configured_key"),
+        (FAKE_GROQ_KEY, None, "groq_key"),
+    ],
+    ids=["configured_key", "known_pattern"],
+)
+def test_context_redactions_reach_the_prompt_step_and_the_report(
+    home: Path, tmp_path: Path, secret: str, env: dict[str, str] | None, kind: str
+) -> None:
+    settings = f'KEY = "{secret}"\nDEBUG = False\n'
+    harness = E2E(home, make_repo(tmp_path / "repo", {**FILES, "src/calc/settings.py": settings}))
+    try:
+        harness.criteria({"kind": "command", "argv": [*PYTEST, "tests/test_calc.py"]})
+        outcome = harness.run(
+            FakeProvider(ok(FIX)),
+            env=env,
+            context_files=["src/calc/ops.py", "src/calc/settings.py"],
+        )
+        assert outcome.task_status == "awaiting_review"
+
+        prompt = harness.steps(outcome)[0]
+        assert prompt.summary is not None and prompt.summary.startswith("prompt: 2 context files")
+        assert prompt_redactions(prompt.summary) >= 1
+        assert f"{kind}: " in prompt.summary
+        assert prompt.payload_ref is not None
+        payload = json.loads(harness.artifacts.read(prompt.payload_ref))
+        assert payload["redacted"] >= 1 and payload["types"][kind] >= 1
+
+        run = create_eval_run(
+            harness.conn,
+            strategy="senior",
+            split="tuning",
+            git_sha="x",
+            config_hash="h",
+            profile="micro",
+            repeats=1,
+            planned=1,
+            estimate_usd=1.0,
+        )
+        add_eval_result(
+            harness.conn,
+            run.id,
+            "settings",
+            repeat_index=0,
+            status="solved",
+            task_id=harness.task.id,
+            attempts=1,
+        )
+        finish_eval_run(harness.conn, run.id, "completed")
+        report = build_report(harness.conn, [run.id], resamples=10)
+        (senior,) = report.sections[0].strategies
+        assert senior.redactions >= 1
+        row = [
+            line
+            for line in render_markdown(report).splitlines()
+            if line.startswith("| senior |") and line.count("|") == len(FAILURE_KINDS) + 5
+        ]
+        assert len(row) == 1 and int(row[0].rstrip(" |").rsplit("|", 1)[1]) >= 1
+
+        # The key itself is in neither the prompt artifacts nor the database.
+        forbidden = pieces(secret)
+        prompts = [p for p in artifacts_dir(home).rglob("prompt-*.json") if p.is_file()]
+        assert prompts
+        harness.conn.execute("PRAGMA wal_checkpoint(FULL)")
+        texts = [p.read_text("utf-8") for p in prompts]
+        texts.append(db_path(home).read_bytes().decode("latin-1"))
+        tables = [
+            row[0]
+            for row in harness.conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
+        ]
+        for table in tables:
+            for values in harness.conn.execute(f'SELECT * FROM "{table}"'):
+                texts.append(" ".join(str(value) for value in values))
+        for text in texts:
+            assert [piece for piece in forbidden if piece in text] == [], text[:200]
+        # Positive control: the key really was in the context file.
+        assert secret in (tmp_path / "repo" / "src/calc/settings.py").read_text()
+    finally:
+        harness.conn.close()

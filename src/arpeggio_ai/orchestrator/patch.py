@@ -9,6 +9,16 @@ redacted context (``patch_writes_redacted_placeholder``). ``git apply --check`` 
 paths the diff declared, and the result is committed on the attempt branch as
 ``Arpeggio <arpeggio@localhost>``.
 
+Hunk counts are recounted from the hunk bodies (M0.7) when the reply ended with
+``finish_reason`` ``stop``: models often get the ``@@`` counts wrong while the lines are
+right. A truncated reply is never recounted, so a cut-off diff still fails as
+``output_truncated``. A line inside a hunk that is not a diff line is ``patch_malformed``,
+and so is a non-rename section whose ``diff --git``, ``---`` and ``+++`` headers name two
+different files or a ``diff --git`` line that is not ``a/<path> b/<path>``.
+The prompt lists the exact context paths as the only files to modify, and a diff that
+modifies, deletes or renames a path missing from the worktree's base commit (``git
+ls-files`` in the attempt worktree, compared exactly) is ``patch_unknown_path``.
+
 Line endings are normalized per file before ``git apply`` (EXE-08). Each modified or
 deleted file is classified from the worktree: ``crlf`` when at least 95% of its line breaks
 are CRLF, ``lf`` when at least 95% are a bare LF, else ``mixed``. A new file is ``crlf``
@@ -50,6 +60,8 @@ FailureReason = Literal[
     "patch_mixed_line_endings",
     "patch_line_endings_changed",
     "patch_writes_redacted_placeholder",
+    "patch_malformed",
+    "patch_unknown_path",
     "output_truncated",
 ]
 # Patch failures a reply cut off at the output limit explains (M0.6.1).
@@ -66,6 +78,7 @@ SECRET_PATTERNS = (".env*", "*.pem", "*.key", "id_*", "*credentials*", "secrets.
 _FENCE = re.compile(r"^ {0,3}(`{3,}|~{3,})[ \t]*([^\s`~]*)")
 _HUNK = re.compile(r"^@@ -\d+(?:,(\d+))? \+\d+(?:,(\d+))? @@")
 _HUNK_NEW_START = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)")
+_HUNK_FULL = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@(.*)$")
 _DIFF_GIT = re.compile(r"^diff --git a/(.+) b/(.+)$")
 _DRIVE = re.compile(r"^[A-Za-z]:")
 _SYMLINK_MODE = re.compile(r"^(new file|deleted file|old|new) mode 120000\s*$")
@@ -202,6 +215,9 @@ def validate_patch(diff: str, worktree: Path) -> list[str]:
         problem = _path_problem(path, worktree)
         if problem is not None:
             raise PatchError("patch_unsafe", f"{path}: {problem}")
+    problem = header_problem(parse_diff(diff))
+    if problem is not None:
+        raise PatchError("patch_malformed", problem)
     placeholders = redacted_added_lines(parse_diff(diff))
     if placeholders:
         # Paths and line numbers only: the lines themselves may sit next to real secrets.
@@ -211,6 +227,65 @@ def validate_patch(diff: str, worktree: Path) -> list[str]:
             f"added lines contain a {REDACTION_MARKER}...] placeholder at {where}",
         )
     return sorted(declared)
+
+
+def recount_hunks(diff: str) -> tuple[str, int]:
+    """Rewrite each hunk's ``@@`` counts from its body. Returns the diff and the number of
+    hunks whose counts changed; a hunk whose counts are right keeps its header byte for byte.
+
+    A hunk body runs until the next ``@@``, ``diff --git`` or ``---``/``+++`` pair (a pair
+    still inside the declared counts is a removed and an added line, as in git) or the end.
+    Context and blank lines count on both sides, ``-`` on the old side, ``+`` on the new one.
+    Blank lines at the end of a hunk are kept but not counted. Any other line inside a hunk
+    is ``patch_malformed``, unless the counted lines already match the header, where git
+    ends the hunk too. No line is ever added or removed.
+    """
+    lines = diff.split("\n")
+    out = list(lines)
+    changed = 0
+    header: re.Match[str] | None = None
+    at = old = new = blanks = 0
+
+    def close() -> None:
+        nonlocal header, changed
+        if header is None:
+            return
+        old_start, old_count, new_start, new_count, rest = header.groups()
+        if (old, new) != (int(old_count or 1), int(new_count or 1)):
+            ending = "\r" if lines[at].endswith("\r") else ""
+            out[at] = f"@@ -{old_start},{old} +{new_start},{new} @@{rest}{ending}"
+            changed += 1
+        header = None
+
+    for number, raw in enumerate(lines):
+        line = raw.removesuffix("\r")
+        if header is not None:
+            declared_old, declared_new = int(header.group(2) or 1), int(header.group(4) or 1)
+            inside = old < declared_old and new < declared_new
+            pair = (
+                line.startswith("--- ")
+                and number + 1 < len(lines)
+                and lines[number + 1].startswith("+++ ")
+            )
+            if line.startswith(("@@ ", "diff --git ")) or (pair and not inside):
+                close()
+            elif line == "":
+                blanks += 1
+                continue
+            elif line[:1] in (" ", "-", "+", "\\"):
+                old += blanks + (line[:1] in (" ", "-"))
+                new += blanks + (line[:1] in (" ", "+"))
+                blanks = 0
+                continue
+            elif (old, new) == (declared_old, declared_new):
+                close()
+            else:
+                raise PatchError("patch_malformed", f"diff line {number + 1} is not a hunk line")
+        match = _HUNK_FULL.match(line)
+        if match:
+            header, at, old, new, blanks = match, number, 0, 0, 0
+    close()
+    return "\n".join(out), changed
 
 
 LineKind = Literal["header", "hunk", "context", "removed", "added", "no_newline"]
@@ -309,6 +384,46 @@ def redacted_added_lines(parsed: ParsedDiff) -> list[tuple[str, int]]:
                 found.append((section.new or section.old or "?", line_number))
             line_number += 1
     return found
+
+
+def header_problem(parsed: ParsedDiff) -> str | None:
+    """Why the headers of a non-rename, non-copy file section name two different files.
+
+    ``diff --git`` must read ``a/<path> b/<path>``, and those paths and the ``---``/``+++``
+    paths (``/dev/null`` aside) must all be the same file (M0.7).
+    """
+    names: dict[int, list[str]] = {}
+    moved: set[int] = set()
+    for line, (kind, index) in zip(parsed.lines, parsed.kinds, strict=True):
+        line = line.rstrip("\r")
+        if kind != "header" or index < 0:
+            continue
+        if line.startswith("diff --git "):
+            match = _DIFF_GIT.match(line)
+            if match is None:
+                left, _, right = line[len("diff --git ") :].partition(" ")
+                return f"diff --git needs a/<path> b/<path>, got {left} and {right}"
+            names.setdefault(index, []).extend(match.groups())
+        elif line.startswith(("rename from ", "rename to ", "copy from ", "copy to ")):
+            moved.add(index)
+        elif line.startswith(("--- ", "+++ ")):
+            path = _header_path(line[4:])
+            if path is not None:
+                names.setdefault(index, []).append(path)
+    for index, paths in sorted(names.items()):
+        if index in moved:
+            continue
+        different = sorted(set(paths))
+        if len(different) > 1:
+            return f"the a/ and b/ paths name different files: {different[0]} and {different[1]}"
+    return None
+
+
+def unknown_paths(parsed: ParsedDiff, tracked: Collection[str]) -> list[str]:
+    """Paths the diff modifies, deletes or renames from that are not in ``tracked`` (the
+    files of the base commit). A new file (``/dev/null`` or ``new file mode``) is never
+    unknown. Compared exactly, so a wrong case is unknown on Windows too."""
+    return sorted({s.old for s in parsed.sections if s.old is not None and s.old not in tracked})
 
 
 def redacted_hunk_paths(parsed: ParsedDiff) -> list[str]:
@@ -449,13 +564,30 @@ async def apply_patch(
     env: Mapping[str, str],
     home: Path,
     on_normalized: Callable[[LineEndingPlan], None] | None = None,
+    recount: bool = False,
 ) -> str:
     """Validate, normalize, apply and commit ``diff`` in ``worktree``. Returns the commit SHA.
 
-    ``on_normalized`` receives the diff that will be applied, before ``git apply`` runs, so
-    it can be stored whether or not it applies.
+    ``recount`` rewrites the hunk counts from their bodies (``recount_hunks``) after the raw
+    diff passed validation; the result is validated again. Only a complete reply
+    (``finish_reason`` ``stop``) is recounted. ``on_normalized`` receives the diff that will
+    be applied, before ``git apply`` runs, so it can be stored whether or not it applies.
     """
     declared = set(validate_patch(diff, worktree))
+    if recount:
+        diff, recounted = recount_hunks(diff)
+        if recounted:
+            log.info("patch.hunks_recounted", extra={"hunks": recounted})
+            declared = set(validate_patch(diff, worktree))
+    tracked = await git(["ls-files", "-z"], cwd=worktree, env=env, home=home)
+    if tracked.exit_code != 0:
+        raise PatchError("patch_does_not_apply", f"git ls-files failed: {tracked.text().strip()}")
+    unknown = unknown_paths(parse_diff(diff), set(tracked.text().split("\0")))
+    if unknown:
+        raise PatchError(
+            "patch_unknown_path",
+            f"modifies paths not in the base commit and not created by the diff: {unknown}",
+        )
     redacted = redacted_hunk_paths(parse_diff(diff))
     if redacted:
         # Context was redacted before it reached the model, so these hunks may not match.
@@ -566,10 +698,16 @@ def build_prompt(
     feedback: str | None = None,
 ) -> str:
     """The user message: the task, the checks that judge it, the context files and, for an
-    escalated attempt, the previous attempt's failure report (VER-03)."""
+    escalated attempt, the previous attempt's failure report (VER-03). The exact context
+    paths are listed as the only files the diff may modify (M0.7)."""
     parts = [f"Task:\n{request.strip()}", "Checks that must pass after your diff is applied:"]
     parts.append("\n".join(f"{n}. {check}" for n, check in enumerate(checks, start=1)))
     if context:
+        listing = "\n".join(f"- {path}" for path, _ in context)
+        parts.append(
+            f"Files you may modify, with these exact paths:\n{listing}\n"
+            "Modify only these files. Create a new file only when the task needs one."
+        )
         parts.append("Files from the repository (paths relative to the root):")
         for path, text in context:
             parts.append(f"File `{path}`:\n````\n{text}\n````")
