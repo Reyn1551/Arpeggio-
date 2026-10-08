@@ -32,6 +32,7 @@ from arpeggio_ai.core.errors import StoreError
 from arpeggio_ai.core.ids import new_id
 from arpeggio_ai.core.logs import log_context
 from arpeggio_ai.orchestrator.patch import (
+    LineEndingPlan,
     PatchError,
     apply_patch,
     build_prompt,
@@ -69,6 +70,9 @@ from arpeggio_ai.verify.criteria import describe as describe_criterion
 from arpeggio_ai.verify.runner import run_criteria
 
 log = logging.getLogger(__name__)
+
+RAW_PATCH_ARTIFACT = "patch-raw.diff"  # the diff as the model wrote it
+PATCH_ARTIFACT = "patch.diff"  # the diff after line-ending normalization, as applied
 
 
 def overhead_history(conn: sqlite3.Connection) -> Callable[[str, str], int]:
@@ -236,6 +240,30 @@ def _record_prompt(
     )
 
 
+def _record_patch(
+    conn: sqlite3.Connection,
+    artifacts: ArtifactStore,
+    *,
+    task_id: str,
+    attempt_id: str,
+    plan: LineEndingPlan,
+) -> None:
+    """Store the diff that is about to be applied and a ``message`` step pointing at it."""
+    ref = artifacts.write(task_id, attempt_id, PATCH_ARTIFACT, plan.diff.encode("utf-8"))
+    counts = Counter(plan.expected.values())
+    endings = ", ".join(f"{name}: {count}" for name, count in sorted(counts.items()))
+    noun = "file" if len(plan.expected) == 1 else "files"
+    summary = f"patch: {len(plan.expected)} {noun} (line endings {endings or 'none'})"
+    append_step(
+        conn,
+        attempt_id,
+        "message",
+        summary=summary[:SUMMARY_MAX_CHARS],
+        payload_ref=ref,
+        cost_usd=0.0,
+    )
+
+
 async def run_patch_attempt(
     conn: sqlite3.Connection,
     artifacts: ArtifactStore,
@@ -351,7 +379,14 @@ async def run_patch_attempt(
 
         try:
             diff = extract_patch(result.final_message)
-            await apply_patch(diff, tree.path, attempt_id=attempt.id, env=env, home=home)
+            artifacts.write(task_id, attempt.id, RAW_PATCH_ARTIFACT, diff.encode("utf-8"))
+
+            def record(plan: LineEndingPlan) -> None:
+                _record_patch(conn, artifacts, task_id=task_id, attempt_id=attempt.id, plan=plan)
+
+            await apply_patch(
+                diff, tree.path, attempt_id=attempt.id, env=env, home=home, on_normalized=record
+            )
         except PatchError as error:
             return _record_failure(
                 conn,

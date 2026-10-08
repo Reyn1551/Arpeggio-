@@ -143,9 +143,11 @@ def test_correct_fix_passes_every_check(e2e: E2E) -> None:
     assert [v.passed for v in verdicts] == [True, True] == [v.passed for v in outcome.verdicts]
     assert all(v.log_ref and v.kind == "check" for v in verdicts)
 
-    prompt, step = e2e.steps(outcome)
+    prompt, step, patch = e2e.steps(outcome)
     assert (prompt.kind, prompt.summary) == ("message", "prompt: 1 context file, nothing redacted")
     assert step.kind == "model_call" and step.cost_usd and step.cost_usd > 0
+    assert (patch.kind, patch.summary) == ("message", "patch: 1 file (line endings lf: 1)")
+    assert patch.payload_ref == f"{e2e.task.id}/{attempt.id}/patch.diff"
     assert_totals_match_steps(e2e, outcome)
 
     worktree = Path(attempt.worktree)
