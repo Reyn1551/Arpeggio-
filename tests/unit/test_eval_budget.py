@@ -80,6 +80,16 @@ def test_escalated_prompt_reserves_room_for_the_failure_report() -> None:
     assert prompt_chars(task(), 0, escalated=False) == first - 2000
 
 
+def test_prompt_chars_follow_the_edit_format() -> None:
+    from arpeggio_ai.orchestrator.patch import system_prompt
+
+    udiff = prompt_chars(task(), 0, escalated=False)
+    assert prompt_chars(task(), 0, escalated=False, edit_format="udiff") == udiff
+    whole = prompt_chars(task(), 0, escalated=False, edit_format="whole-file")
+    # "your diff is" -> "your edits are" in the checks line: two characters longer
+    assert whole - udiff == len(system_prompt("whole-file")) - len(system_prompt()) + 2
+
+
 @pytest.mark.parametrize(
     ("max_usd", "monthly", "spent", "expected"),
     [

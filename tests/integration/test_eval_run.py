@@ -1,5 +1,6 @@
 """Eval runs end to end on the sample suite with a fake model (EVL-03, VER-03, CST-05)."""
 
+import asyncio
 import sys
 from collections.abc import Iterator
 from pathlib import Path
@@ -9,7 +10,7 @@ import pytest
 from fakes import deepseek_usage, ok, status
 from runkit import RunHarness, write_report
 
-from arpeggio_ai.evals.budget import BudgetError, check_estimate
+from arpeggio_ai.evals.budget import BudgetError, SpendCap, check_estimate
 from arpeggio_ai.evals.feedback import TRUNCATED_HINT
 from arpeggio_ai.evals.runner import counterfactual_usd
 from arpeggio_ai.store.repositories import (
@@ -368,3 +369,34 @@ def test_monthly_spend_counts_eval_attempts(h: RunHarness) -> None:
     run = list_eval_runs(h.conn)[0]
     month = run.started_at[:7]
     assert month_eval_spend_usd(h.conn, month) == pytest.approx(outcome.spent_usd)
+
+
+def test_edit_format_is_stored_on_completed_and_aborted_runs(h: RunHarness) -> None:
+    plan = h.plan(ids=["sample-fix-add"], strategies=("junior",))
+    assert plan.edit_format == "udiff"
+    h.run(plan)
+    plan.edit_format = "search-replace"
+
+    def broken(config: object) -> object:
+        raise RuntimeError("context failed")
+
+    from arpeggio_ai.evals.runner import EvalRunner
+    from arpeggio_ai.store.artifacts import ArtifactStore
+
+    runner = EvalRunner(
+        h.conn,
+        ArtifactStore(h.home / "artifacts"),
+        home=h.home,
+        evals_root=h.root,
+        context_for=broken,  # type: ignore[arg-type]
+        cap=SpendCap(10.0),
+        git_sha="0" * 40,
+        config_hash="test",
+        profile=h.config.budget.profile,
+    )
+    with pytest.raises(RuntimeError):
+        asyncio.run(runner.run(plan))
+    done, aborted = list_eval_runs(h.conn)
+    assert done.status == "completed" and done.summary is not None
+    assert done.summary["edit_format"] == "udiff"
+    assert aborted.status == "aborted" and aborted.summary == {"edit_format": "search-replace"}

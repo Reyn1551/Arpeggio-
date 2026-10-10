@@ -405,6 +405,13 @@ def run_command_(
             " to run another profile into the same database.",
         ),
     ] = None,
+    edit_format: Annotated[
+        Literal["udiff", "search-replace", "whole-file"],
+        typer.Option(
+            "--edit-format",
+            help="Experimental (M0.8): how the model writes its change. udiff is EXE-08.",
+        ),
+    ] = "udiff",
     json_flag: JsonOption = False,
 ) -> None:
     """Run the baseline strategies on the eval suite (spends money unless --dry-run)."""
@@ -441,6 +448,7 @@ def run_command_(
                     home=home,
                     at=at,
                     overhead=overhead,
+                    edit_format=edit_format,
                 )
             )
             notices = peak_notices(plan.route_keys(), at)
@@ -517,7 +525,8 @@ def run_command_(
     plan = summary["plan"]
     out.print(
         f"profile {summary['profile']}, split {plan['split']}, strategies"
-        f" {', '.join(plan['strategies'])}, repeats {plan['repeats']}:"
+        f" {', '.join(plan['strategies'])}, repeats {plan['repeats']},"
+        f" edit format {plan['edit_format']}:"
         f" {plan['planned_task_runs']} task runs per strategy",
         markup=False,
     )

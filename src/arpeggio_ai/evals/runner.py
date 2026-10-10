@@ -14,6 +14,10 @@ hidden tests are copied in. An attempt that fails its checks, whose patch fails
 (``patch_*``) or whose reply was cut off before a usable diff (``output_truncated``) escalates to the next route with a compact failure report
 (``evals/feedback.py``). Provider errors, timeouts, setup failures and guard refusals do
 not escalate. Worktrees are removed after each attempt unless ``keep_worktrees``.
+
+``edit_format`` (M0.8, experimental) is how every attempt of the run asks the model to
+write its change. It is stored in each attempt's ``route_reason`` and in the eval run's
+``summary``, also for an aborted run, so ``eval matrix`` can group runs by it.
 """
 
 import asyncio
@@ -46,6 +50,7 @@ from arpeggio_ai.evals.strategies import PlannedRoute, Strategy, plan_routes
 from arpeggio_ai.evals.suite import TaskEntry, latest_checks, run_status
 from arpeggio_ai.evals.task import EvalTask, Split
 from arpeggio_ai.orchestrator.attempts import PatchAttemptOutcome, PrepareError, run_patch_attempt
+from arpeggio_ai.orchestrator.patch import EditFormat
 from arpeggio_ai.routing.policy import PolicyFile
 from arpeggio_ai.routing.resolve import NoAllowedRoute
 from arpeggio_ai.safety.process import ProcessError, provider_key_names, run_process, scrubbed_env
@@ -127,6 +132,7 @@ class RunPlan:
     split: EvalSplit
     at: datetime
     policy_source: str
+    edit_format: EditFormat = "udiff"
 
     def strategy_estimate_usd(self, strategy: Strategy) -> float:
         total = sum(
@@ -156,6 +162,7 @@ class RunPlan:
             "strategies": list(self.strategies),
             "split": self.split,
             "repeats": self.repeats,
+            "edit_format": self.edit_format,
             "planned_task_runs": self.planned,
             "estimate_usd": self.estimate_usd,
             "estimate_per_strategy_usd": {
@@ -216,12 +223,13 @@ async def build_plan(
     home: Path,
     at: datetime,
     overhead: OverheadFor = lambda provider, model: 0,
+    edit_format: EditFormat = "udiff",
 ) -> RunPlan:
     """Select runnable tasks and plan every strategy's routes and worst-case cost."""
     if repeats < 1:
         raise EvalRunError("--repeats must be >= 1")
     checks = latest_checks(evals_root)
-    plan = RunPlan([], [], strategies, repeats, split, at, policy_source)
+    plan = RunPlan([], [], strategies, repeats, split, at, policy_source, edit_format)
     for entry in entries:
         status = run_status(entry, evals_root, checks)
         if status != "valid" or entry.task is None:
@@ -258,7 +266,9 @@ async def build_plan(
                     worst_case_usd(
                         config,
                         route.model,
-                        chars=prompt_chars(task, size, escalated=step > 0),
+                        chars=prompt_chars(
+                            task, size, escalated=step > 0, edit_format=edit_format
+                        ),
                         max_tokens=config.evals.max_tokens,
                         at=at,
                         observed_overhead_tokens=overhead(spec.provider, route.model),
@@ -375,10 +385,18 @@ class EvalRunner:
                     for strategy in plan.strategies:
                         if self.cap.stopped:
                             break
-                        await self._run_one(runs[strategy], strategy, task_plan, repeat)
+                        await self._run_one(
+                            runs[strategy], strategy, task_plan, repeat, plan.edit_format
+                        )
         except BaseException as error:
             for run in runs.values():
-                finish_eval_run(self.conn, run.id, "aborted", reason=type(error).__name__)
+                finish_eval_run(
+                    self.conn,
+                    run.id,
+                    "aborted",
+                    reason=type(error).__name__,
+                    summary={"edit_format": plan.edit_format},
+                )
             raise
         status: EvalRunStatus = "partial" if self.cap.stopped else "completed"
         reason = None
@@ -393,7 +411,10 @@ class EvalRunner:
                 run.id,
                 status,
                 reason=reason,
-                summary={"spent_usd": round(self.cap.spent_usd, 8)},
+                summary={
+                    "spent_usd": round(self.cap.spent_usd, 8),
+                    "edit_format": plan.edit_format,
+                },
             )
             for strategy, run in runs.items()
         }
@@ -453,7 +474,12 @@ class EvalRunner:
         return failed
 
     async def _run_one(
-        self, run: EvalRun, strategy: Strategy, plan: TaskPlan, repeat: int
+        self,
+        run: EvalRun,
+        strategy: Strategy,
+        plan: TaskPlan,
+        repeat: int,
+        edit_format: EditFormat = "udiff",
     ) -> None:
         task, config = plan.task, plan.config
         strategy_plan = plan.strategies[strategy]
@@ -524,10 +550,11 @@ class EvalRunner:
                 max_tokens=config.evals.max_tokens,
                 context_files=task.context_files,
                 eval_task=task,
-                route_reason=route.reason,
+                route_reason={**route.reason, "edit_format": edit_format},
                 feedback=feedback,
                 prepare=self._prepare(task, env, db_task.id),
                 base=base,
+                edit_format=edit_format,
             )
             attempts += 1
             self.cap.add(task_cost_usd(self.conn, db_task.id) - before)

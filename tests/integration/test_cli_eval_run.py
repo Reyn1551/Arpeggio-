@@ -15,7 +15,9 @@ from typer.testing import CliRunner, Result
 from arpeggio_ai.cli.app import app
 from arpeggio_ai.cli.commands import evals as evals_cli
 from arpeggio_ai.config.loader import template_bytes
-from arpeggio_ai.paths import EVALS_ENV_VAR
+from arpeggio_ai.paths import EVALS_ENV_VAR, db_path
+from arpeggio_ai.store.db import open_db
+from arpeggio_ai.store.repositories import list_eval_runs
 
 runner = CliRunner()
 OPT_IN = "\n[privacy]\nallow_training_providers = true\n"
@@ -202,3 +204,71 @@ def test_unknown_id_and_empty_runs(suite: Path) -> None:
     result = invoke("eval", "run", "--dry-run", "--id", "nope-task", "--json")
     assert result.exit_code == 1
     assert data(invoke("eval", "runs", "--json"))["runs"] == []
+
+
+# Edit formats (M0.8). The M0.8 PowerShell script reads `$r.runs.middle` from the JSON of
+# one `eval run --strategy middle --json` and keeps the id only for a completed run.
+
+WHOLE_ADD = (
+    "FILE: src/calc/ops.py\n<<<<<<< CONTENT\ndef add(a, b):\n    return a + b\n>>>>>>> END\n"
+)
+WHOLE_MUL = (
+    "FILE: src/calc/ops.py\n<<<<<<< CONTENT\ndef add(a, b):\n    return a + b\n\n\n"
+    "def mul(a, b):\n    return a * b\n>>>>>>> END\n"
+)
+
+
+def test_dry_run_shows_the_edit_format(suite: Path) -> None:
+    args = ["eval", "run", "--split", "tuning", "--dry-run"]
+    assert data(invoke(*args, "--json"))["plan"]["edit_format"] == "udiff"
+    out = data(invoke(*args, "--edit-format", "whole-file", "--json"))
+    assert out["plan"]["edit_format"] == "whole-file"
+    assert "edit format whole-file:" in invoke(*args, "--edit-format", "whole-file").stdout
+    assert invoke(*args, "--edit-format", "fuzzy").exit_code == 2
+
+
+def test_run_json_exposes_the_run_id_per_strategy(
+    suite: Path, home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    requests: list[dict[str, Any]] = []
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        requests.append(body)
+        user = next(m["content"] for m in body["messages"] if m["role"] == "user")
+        reply = WHOLE_MUL if "product" in user else WHOLE_ADD
+        return ok(reply, usage=deepseek_usage(800, 0, 100), model=body["model"])
+
+    monkeypatch.setattr(evals_cli, "TRANSPORT", httpx.MockTransport(handle))
+    monkeypatch.setenv("DEEPSEEK_API_KEY", FAKE_KEY)
+    args = ["eval", "run", "--split", "tuning", "--strategy", "middle", "--max-usd", "0.4"]
+    result = invoke(*args, "--edit-format", "whole-file", "--json")
+    assert result.exit_code == 0, result.stdout
+    out = json.loads(result.stdout)  # one JSON document on stdout, nothing else
+    assert out["ok"] is True and out["status"] == "completed"
+    assert set(out["runs"]) == {"middle"}
+    run_id = out["runs"]["middle"]
+    assert isinstance(run_id, str) and len(run_id) == 26
+    assert "<<<<<<< CONTENT" in requests[0]["messages"][0]["content"]
+
+    listed = data(invoke("eval", "runs", "--json"))["runs"]
+    assert [(r["id"], r["status"], r["solved"]) for r in listed] == [(run_id, "completed", 2)]
+    conn = open_db(db_path(home))
+    try:
+        (run,) = list_eval_runs(conn)
+        assert run.summary is not None and run.summary["edit_format"] == "whole-file"
+        reasons = {
+            json.loads(row[0])["edit_format"]
+            for row in conn.execute("SELECT route_reason FROM attempts")
+        }
+        assert reasons == {"whole-file"}
+    finally:
+        conn.close()
+
+
+def test_refused_run_has_no_run_id(suite: Path, model: Model) -> None:
+    args = ["eval", "run", "--split", "tuning", "--strategy", "middle"]
+    result = invoke(*args, "--max-usd", "0.000001", "--edit-format", "whole-file", "--json")
+    assert result.exit_code == 1
+    out = json.loads(result.stdout)
+    assert out["ok"] is False and "runs" not in out

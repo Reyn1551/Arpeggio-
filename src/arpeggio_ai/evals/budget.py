@@ -31,7 +31,12 @@ from arpeggio_ai.cost.guard import GUARD_CHARS_PER_TOKEN, prompt_overhead
 from arpeggio_ai.cost.pricing import compute_cost, estimate_tokens, price_window, round_usd, snapshot
 from arpeggio_ai.evals.feedback import FEEDBACK_TAIL_CHARS
 from arpeggio_ai.evals.task import EvalTask
-from arpeggio_ai.orchestrator.patch import CONTEXT_CAP_BYTES, build_prompt, system_prompt
+from arpeggio_ai.orchestrator.patch import (
+    CONTEXT_CAP_BYTES,
+    EditFormat,
+    build_prompt,
+    system_prompt,
+)
 from arpeggio_ai.safety.worktree import WorktreeError, git
 from arpeggio_ai.verify.criteria import describe
 
@@ -73,11 +78,14 @@ async def context_bytes(
     return min(total, CONTEXT_CAP_BYTES)
 
 
-def prompt_chars(task: EvalTask, context_size: int, *, escalated: bool) -> int:
+def prompt_chars(
+    task: EvalTask, context_size: int, *, escalated: bool, edit_format: EditFormat = "udiff"
+) -> int:
     """Characters of the system prompt and user message for one attempt of ``task``."""
     checks = [describe(criterion) for criterion in task.criteria]
     paths = [(path, "") for path in task.context_files]
-    chars = len(system_prompt()) + len(build_prompt(task.request, checks, paths)) + context_size
+    message = build_prompt(task.request, checks, paths, edit_format=edit_format)
+    chars = len(system_prompt(edit_format)) + len(message) + context_size
     if escalated:
         chars += FEEDBACK_BASE_CHARS + FEEDBACK_PER_CHECK_CHARS * len(task.criteria)
     return chars
