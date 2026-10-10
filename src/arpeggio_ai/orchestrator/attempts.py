@@ -14,7 +14,7 @@ import json
 import logging
 import sqlite3
 from collections import Counter
-from collections.abc import Awaitable, Callable, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -33,7 +33,9 @@ from arpeggio_ai.core.ids import new_id
 from arpeggio_ai.core.logs import log_context
 from arpeggio_ai.evals.hidden import hidden_paths
 from arpeggio_ai.evals.task import EvalTask
+from arpeggio_ai.orchestrator.edits import EditPlan, apply_edits
 from arpeggio_ai.orchestrator.patch import (
+    EditFormat,
     LineEndingPlan,
     PatchError,
     apply_patch,
@@ -50,7 +52,7 @@ from arpeggio_ai.safety.secret_scan import (
     scanner_from_config,
     use_scanner,
 )
-from arpeggio_ai.safety.worktree import WorktreeError, create_worktree
+from arpeggio_ai.safety.worktree import WorktreeError, create_worktree, git
 from arpeggio_ai.store.artifacts import ArtifactStore
 from arpeggio_ai.store.repositories import (
     AttemptStatus,
@@ -90,6 +92,7 @@ Prepare = Callable[[Path, str], Awaitable[None]]  # (worktree, attempt_id)
 
 RAW_PATCH_ARTIFACT = "patch-raw.diff"  # the diff as the model wrote it
 PATCH_ARTIFACT = "patch.diff"  # after hunk recount and line-ending normalization, as applied
+RAW_EDIT_ARTIFACT = "patch-raw.edit"  # the reply of an experimental edit format (M0.8)
 
 
 def overhead_history(conn: sqlite3.Connection) -> Callable[[str, str], int]:
@@ -283,6 +286,40 @@ def _record_patch(
     )
 
 
+def _record_edits(
+    conn: sqlite3.Connection,
+    artifacts: ArtifactStore,
+    *,
+    task_id: str,
+    attempt_id: str,
+    plan: EditPlan,
+) -> None:
+    """A ``message`` step for planned edits (M0.8): files, line endings and the largest
+    share of an existing file's lines they remove (``eval matrix`` reads it back)."""
+    counts = Counter(plan.expected.values())
+    endings = ", ".join(f"{name}: {count}" for name, count in sorted(counts.items()))
+    payload = {
+        "files": sorted(plan.contents),
+        "endings": dict(sorted(plan.expected.items())),
+        "shrink": plan.shrink,
+    }
+    data = json.dumps(payload, indent=2).encode("utf-8")
+    ref = artifacts.write(task_id, attempt_id, f"edits-{new_id()}.json", data)
+    noun = "file" if len(plan.contents) == 1 else "files"
+    summary = (
+        f"edits: {len(plan.contents)} {noun} (line endings {endings or 'none'}),"
+        f" largest shrink {round(plan.shrink * 100)}%"
+    )
+    append_step(
+        conn,
+        attempt_id,
+        "message",
+        summary=summary[:SUMMARY_MAX_CHARS],
+        payload_ref=ref,
+        cost_usd=0.0,
+    )
+
+
 async def run_patch_attempt(
     conn: sqlite3.Connection,
     artifacts: ArtifactStore,
@@ -300,6 +337,7 @@ async def run_patch_attempt(
     feedback: str | None = None,
     prepare: Prepare | None = None,
     base: str | None = None,
+    edit_format: EditFormat = "udiff",
 ) -> PatchAttemptOutcome:
     """Run one patch attempt end to end and set the attempt and task status.
 
@@ -323,6 +361,11 @@ async def run_patch_attempt(
     scanner like the rest of the prompt. ``prepare`` runs after the patch is applied and
     before the checks; a ``PrepareError`` ends the attempt as ``error`` with its reason.
     ``base`` is the full commit SHA the worktree starts from (default: the repo's HEAD).
+
+    ``edit_format`` other than ``udiff`` (M0.8, experimental) asks for that format and
+    applies it with ``orchestrator.edits``. A reply whose ``finish_reason`` is not ``stop``
+    is then ``output_truncated`` before it is parsed, and ``patch.diff`` holds the diff git
+    computes from the commit, not anything the model wrote.
     """
     task = get_task(conn, task_id)
     if task is None:
@@ -392,7 +435,7 @@ async def run_patch_attempt(
             files=[path for path, _ in context_texts],
             redactions=redactions,
         )
-        prompt = build_prompt(request, checks, context_texts, feedback)
+        prompt = build_prompt(request, checks, context_texts, feedback, edit_format)
         spec = AttemptSpec(
             task_id=task_id,
             attempt_id=attempt.id,
@@ -403,7 +446,7 @@ async def run_patch_attempt(
             max_tokens=max_tokens,
             worktree=str(tree.path),
             context_files=[path for path in context_files if path.casefold() not in blocked],
-            system=system_prompt(),
+            system=system_prompt(edit_format),
         )
         adapter = registry.create(route.adapter, context)
         try:
@@ -418,32 +461,51 @@ async def run_patch_attempt(
             log.info("attempt.finished", extra={"status": result.status})
             return PatchAttemptOutcome(attempt.id, result.status, task_status, None, [])
 
-        try:
-            diff = extract_patch(result.final_message)
-            artifacts.write(task_id, attempt.id, RAW_PATCH_ARTIFACT, diff.encode("utf-8"))
-
-            def record(plan: LineEndingPlan) -> None:
-                _record_patch(conn, artifacts, task_id=task_id, attempt_id=attempt.id, plan=plan)
-
-            await apply_patch(
-                diff,
-                tree.path,
-                attempt_id=attempt.id,
-                env=env,
-                home=home,
-                on_normalized=record,
-                recount=result.finish_reason == "stop",
-            )
-        except PatchError as error:
-            reason, detail = truncation_reason(error, result.truncated)
-            return _record_failure(
+        if edit_format != "udiff":
+            failure = await _apply_edit_reply(
                 conn,
                 artifacts,
                 task_id=task_id,
                 attempt_id=attempt.id,
-                reason=reason,
-                detail=detail,
+                reply=result.final_message,
+                finish_reason=result.finish_reason,
+                worktree=tree.path,
+                base_sha=tree.base_sha,
+                edit_format=edit_format,
+                env=env,
+                home=home,
             )
+            if failure is not None:
+                return failure
+        else:
+            try:
+                diff = extract_patch(result.final_message)
+                artifacts.write(task_id, attempt.id, RAW_PATCH_ARTIFACT, diff.encode("utf-8"))
+
+                def record(plan: LineEndingPlan) -> None:
+                    _record_patch(
+                        conn, artifacts, task_id=task_id, attempt_id=attempt.id, plan=plan
+                    )
+
+                await apply_patch(
+                    diff,
+                    tree.path,
+                    attempt_id=attempt.id,
+                    env=env,
+                    home=home,
+                    on_normalized=record,
+                    recount=result.finish_reason == "stop",
+                )
+            except PatchError as error:
+                reason, detail = truncation_reason(error, result.truncated)
+                return _record_failure(
+                    conn,
+                    artifacts,
+                    task_id=task_id,
+                    attempt_id=attempt.id,
+                    reason=reason,
+                    detail=detail,
+                )
 
         if prepare is not None:
             try:
@@ -468,3 +530,60 @@ async def run_patch_attempt(
         set_task_status(conn, task_id, final)
         log.info("attempt.finished", extra={"status": "completed", "task_status": final})
         return PatchAttemptOutcome(attempt.id, "completed", final, None, verdicts)
+
+
+async def _apply_edit_reply(
+    conn: sqlite3.Connection,
+    artifacts: ArtifactStore,
+    *,
+    task_id: str,
+    attempt_id: str,
+    reply: str,
+    finish_reason: str | None,
+    worktree: Path,
+    base_sha: str,
+    edit_format: EditFormat,
+    env: Mapping[str, str],
+    home: Path,
+) -> PatchAttemptOutcome | None:
+    """Apply an experimental-format reply (M0.8). Returns the failure outcome, or None once
+    the edits are committed and ``patch.diff`` holds git's diff of that commit."""
+    if finish_reason != "stop":
+        # Never parse a reply that may be cut off: no recovery from partial output.
+        return _record_failure(
+            conn,
+            artifacts,
+            task_id=task_id,
+            attempt_id=attempt_id,
+            reason="output_truncated",
+            detail=f"finish_reason={finish_reason}: the reply was not parsed",
+        )
+    artifacts.write(task_id, attempt_id, RAW_EDIT_ARTIFACT, reply.encode("utf-8"))
+
+    def record(plan: EditPlan) -> None:
+        _record_edits(conn, artifacts, task_id=task_id, attempt_id=attempt_id, plan=plan)
+
+    try:
+        await apply_edits(
+            reply,
+            worktree,
+            edit_format=edit_format,
+            attempt_id=attempt_id,
+            env=env,
+            home=home,
+            on_planned=record,
+        )
+    except PatchError as error:
+        return _record_failure(
+            conn,
+            artifacts,
+            task_id=task_id,
+            attempt_id=attempt_id,
+            reason=error.reason,
+            detail=error.detail,
+        )
+    applied = await git(
+        ["diff", "--no-color", "--no-ext-diff", base_sha, "HEAD"], cwd=worktree, env=env, home=home
+    )
+    artifacts.write(task_id, attempt_id, PATCH_ARTIFACT, applied.output)
+    return None

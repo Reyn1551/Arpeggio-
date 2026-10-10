@@ -43,7 +43,7 @@ from collections.abc import Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass
 from importlib.resources import files
 from pathlib import Path
-from typing import Literal
+from typing import Literal, get_args
 
 from arpeggio_ai.core.errors import ArpeggioError
 from arpeggio_ai.safety.secret_scan import MARKER as REDACTION_MARKER
@@ -62,11 +62,22 @@ FailureReason = Literal[
     "patch_writes_redacted_placeholder",
     "patch_malformed",
     "patch_unknown_path",
+    "patch_search_not_found",
+    "patch_search_ambiguous",
+    "patch_edit_overlap",
     "output_truncated",
 ]
 # Patch failures a reply cut off at the output limit explains (M0.6.1).
 TRUNCATION_EXPLAINS: frozenset[FailureReason] = frozenset({"patch_missing", "patch_does_not_apply"})
 Ending = Literal["crlf", "lf", "mixed"]
+# How the model writes its change (M0.8). ``udiff`` is EXE-08; the others are experimental
+# and only reachable through ``arpeggio eval run --edit-format`` (orchestrator/edits.py).
+EditFormat = Literal["udiff", "search-replace"]
+EDIT_FORMATS: tuple[EditFormat, ...] = get_args(EditFormat)
+PROMPT_FILES: dict[EditFormat, str] = {
+    "udiff": "patch_system.txt",
+    "search-replace": "edit_search_replace.txt",
+}
 MAX_PATCH_BYTES = 200 * 1024
 LINE_ENDING_SHARE = 0.95
 CONTEXT_CAP_BYTES = 100 * 1024
@@ -99,9 +110,9 @@ def truncation_reason(error: PatchError, truncated: bool) -> tuple[FailureReason
     return error.reason, error.detail
 
 
-def system_prompt() -> str:
-    """The packaged instruction that asks for exactly one unified diff."""
-    resource = files("arpeggio_ai.orchestrator").joinpath("prompts", "patch_system.txt")
+def system_prompt(edit_format: EditFormat = "udiff") -> str:
+    """The packaged instruction for ``edit_format`` (``udiff``: exactly one unified diff)."""
+    resource = files("arpeggio_ai.orchestrator").joinpath("prompts", PROMPT_FILES[edit_format])
     return resource.read_text(encoding="utf-8")
 
 
@@ -612,16 +623,42 @@ async def apply_patch(
                     raise PatchError("patch_mixed_line_endings", detail)
                 raise PatchError("patch_does_not_apply", detail)
 
+    return await commit_attempt(
+        worktree,
+        attempt_id=attempt_id,
+        env=env,
+        home=home,
+        declared=declared,
+        expected=plan.expected,
+        what="diff",
+    )
+
+
+async def commit_attempt(
+    worktree: Path,
+    *,
+    attempt_id: str,
+    env: Mapping[str, str],
+    home: Path,
+    declared: Collection[str],
+    expected: Mapping[str, Ending],
+    what: str,
+) -> str:
+    """Check what changed in ``worktree`` and commit it. Returns the commit SHA.
+
+    Something must have changed, only ``declared`` paths may change, and every file in
+    ``expected`` must keep its line-ending class. ``what`` names the change in details.
+    """
     status = await git(
         ["status", "--porcelain", "-z", "--untracked-files=all"], cwd=worktree, env=env, home=home
     )
     changed = _changed_paths(status.text())
     if not changed:
-        raise PatchError("patch_does_not_apply", "the diff applied but changed nothing")
-    undeclared = sorted(changed - declared)
+        raise PatchError("patch_does_not_apply", f"the {what} applied but changed nothing")
+    undeclared = sorted(changed - set(declared))
     if undeclared:
-        raise PatchError("patch_unsafe", f"changed paths the diff did not declare: {undeclared}")
-    problem = _endings_problem(worktree, plan.expected)
+        raise PatchError("patch_unsafe", f"changed paths the {what} did not declare: {undeclared}")
+    problem = _endings_problem(worktree, expected)
     if problem is not None:
         raise PatchError("patch_line_endings_changed", problem)
 
@@ -696,11 +733,14 @@ def build_prompt(
     checks: Sequence[str],
     context: Sequence[tuple[str, str]],
     feedback: str | None = None,
+    edit_format: EditFormat = "udiff",
 ) -> str:
     """The user message: the task, the checks that judge it, the context files and, for an
     escalated attempt, the previous attempt's failure report (VER-03). The exact context
-    paths are listed as the only files the diff may modify (M0.7)."""
-    parts = [f"Task:\n{request.strip()}", "Checks that must pass after your diff is applied:"]
+    paths are listed as the only files the diff may modify (M0.7). For the experimental
+    edit formats (M0.8) only the checks line changes: "edits" instead of "diff"."""
+    change = "your diff is" if edit_format == "udiff" else "your edits are"
+    parts = [f"Task:\n{request.strip()}", f"Checks that must pass after {change} applied:"]
     parts.append("\n".join(f"{n}. {check}" for n, check in enumerate(checks, start=1)))
     if context:
         listing = "\n".join(f"- {path}" for path, _ in context)

@@ -640,6 +640,73 @@ def test_unsafe_paths_are_still_rejected_with_wrong_counts(e2e: E2E) -> None:
     assert outcome.failure_reason == "patch_unsafe"
 
 
+# Experimental edit formats (M0.8)
+
+SR_FIX = """Fixed.
+
+FILE: src/calc/ops.py
+<<<<<<< SEARCH
+    return a - b
+=======
+    return a + b
+>>>>>>> REPLACE
+"""
+
+
+def test_search_replace_fix_passes_and_stores_gits_diff(e2e: E2E) -> None:
+    provider = FakeProvider(ok(SR_FIX))
+    outcome = e2e.run(provider, edit_format="search-replace")
+    assert (outcome.attempt_status, outcome.task_status, outcome.failure_reason) == (
+        "completed",
+        "awaiting_review",
+        None,
+    )
+    body = json.loads(provider.requests[0].content)
+    system, user = (m["content"] for m in body["messages"])
+    assert "<<<<<<< SEARCH" in system and "```diff" not in system
+    assert "Checks that must pass after your edits are applied:" in user
+    attempt = e2e.attempt(outcome)
+    raw = e2e.artifacts.read(f"{e2e.task.id}/{attempt.id}/patch-raw.edit").decode("utf-8")
+    applied = e2e.artifacts.read(f"{e2e.task.id}/{attempt.id}/patch.diff").decode("utf-8")
+    assert raw == SR_FIX
+    assert "diff --git a/src/calc/ops.py b/src/calc/ops.py" in applied
+    assert "-    return a - b\n+    return a + b" in applied
+    summaries = [s.summary for s in e2e.steps(outcome)]
+    assert "edits: 1 file (line endings lf: 1), largest shrink 0%" in summaries
+
+
+def test_udiff_is_the_default_format(e2e: E2E) -> None:
+    provider = FakeProvider(ok(FIX))
+    assert e2e.run(provider).task_status == "awaiting_review"
+    system = json.loads(provider.requests[0].content)["messages"][0]["content"]
+    assert "```diff" in system
+
+
+@pytest.mark.parametrize("finish", ["length", None])
+def test_edit_reply_not_stopped_is_output_truncated_unparsed(e2e: E2E, finish: str | None) -> None:
+    response = cut(SR_FIX, "length")
+    body = response.json()
+    if finish is None:
+        del body["choices"][0]["finish_reason"]
+    outcome = e2e.run(FakeProvider(type(response)(200, json=body)), edit_format="search-replace")
+    assert (outcome.attempt_status, outcome.failure_reason) == ("error", "output_truncated")
+    failure = e2e.steps(outcome)[-1]
+    assert failure.summary == (
+        f"output_truncated: finish_reason={finish}: the reply was not parsed"
+    )
+    attempt = e2e.attempt(outcome)
+    assert not e2e.artifacts.path(f"{e2e.task.id}/{attempt.id}/patch-raw.edit").exists()
+    assert_unchanged_worktree(e2e, outcome)
+
+
+def test_edit_that_matches_nothing_fails_without_writing(e2e: E2E) -> None:
+    reply = SR_FIX.replace("    return a - b", "    return a - c")
+    outcome = e2e.run(FakeProvider(ok(reply)), edit_format="search-replace")
+    assert (outcome.attempt_status, outcome.failure_reason) == ("error", "patch_search_not_found")
+    assert outcome.verdicts == []
+    assert_unchanged_worktree(e2e, outcome)
+
+
 # Redaction metric wiring (M0.7): context -> prompt step -> eval report
 
 # Clearly fake: 40 characters after gsk_ that spell out that they are a test value.
