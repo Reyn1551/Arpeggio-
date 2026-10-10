@@ -82,6 +82,11 @@ def make(
     return run.id
 
 
+def started(conn: sqlite3.Connection, run_id: str, at: str) -> None:
+    conn.execute("UPDATE eval_runs SET started_at = ? WHERE id = ?", (at, run_id))
+    conn.commit()
+
+
 def baseline(conn: sqlite3.Connection, repo_id: str) -> list[str]:
     return [make(conn, repo_id, "udiff", {"t1"}) for _ in range(3)]
 
@@ -132,6 +137,9 @@ def test_failed_and_missing_runs_show_as_e_and_block_the_verdict(
     ids = baseline(db, repo_id)
     ids.append(make(db, repo_id, "whole-file", {"t1", "t2", "t3"}))
     ids.append(make(db, repo_id, "whole-file", {"t1"}, status="aborted"))
+    # Two runs made in the same millisecond have random ULID order: pin their start times.
+    started(db, ids[-2], "2026-10-10T00:00:00.000Z")
+    started(db, ids[-1], "2026-10-10T00:00:01.000Z")
     matrix = build_matrix(db, ids, expect=3)
     whole = matrix.groups[1]
     assert [(run.status, run.solved) for run in whole.runs] == [
@@ -308,9 +316,62 @@ def test_a_retry_replaces_a_run_with_provider_errors(db: sqlite3.Connection, rep
     hit = make(db, repo_id, "udiff", set(), round_index=1, provider=frozenset({"t1"}))
     retry = make(db, repo_id, "udiff", {"t1"}, round_index=1)
     later = make(db, repo_id, "udiff", {"t1", "t2"}, round_index=1)
+    for second, run_id in enumerate((hit, retry, later)):  # not the same millisecond
+        started(db, run_id, f"2026-10-10T00:00:0{second}.000Z")
     (group,) = build_matrix(db, [hit, retry, later], expect=1).groups
     assert [r.run_id for r in group.runs] == [retry]  # earliest clean, not the best
     assert {s.run_id for s in group.superseded} == {hit, later}
+
+
+def test_runs_without_a_round_are_ordered_by_start_then_id(
+    db: sqlite3.Connection, repo_id: str
+) -> None:
+    # Regression (Linux run on fcb7cfd): slots of runs without a round were sorted by run id
+    # alone, and ULIDs made in the same millisecond have a random order.
+    done = make(db, repo_id, "whole-file", {"t1", "t2"})
+    aborted = make(db, repo_id, "whole-file", {"t1"}, status="aborted")
+    low, high = sorted([done, aborted])
+    started(db, high, "2026-10-10T00:00:00.000Z")  # start order is the reverse of id order
+    started(db, low, "2026-10-10T00:00:00.001Z")
+    (group,) = build_matrix(db, [done, aborted], expect=2).groups
+    assert [r.run_id for r in group.runs] == [high, low]
+    started(db, low, "2026-10-10T00:00:00.000Z")  # same millisecond: the id decides
+    for ids in ([done, aborted], [aborted, done]):
+        (group,) = build_matrix(db, ids, expect=2).groups
+        assert [r.run_id for r in group.runs] == [low, high]
+
+
+def test_slot_choice_does_not_depend_on_the_order_of_ids(
+    db: sqlite3.Connection, repo_id: str
+) -> None:
+    one = make(db, repo_id, "udiff", {"t1"}, round_index=1)
+    two = make(db, repo_id, "udiff", {"t1", "t2"}, round_index=1)
+    for run_id in (one, two):
+        started(db, run_id, "2026-10-10T00:00:00.000Z")
+    chosen = set()
+    for ids in ([one, two], [two, one]):
+        (group,) = build_matrix(db, ids, expect=1).groups
+        chosen.add(group.runs[0].run_id)
+    assert chosen == {min(one, two)}
+
+
+@pytest.mark.parametrize("status", ["aborted", "partial", "running"])
+def test_a_slot_never_prefers_a_run_that_did_not_complete(
+    db: sqlite3.Connection, repo_id: str, status: str
+) -> None:
+    # The rule in _choose: [clean completed] or [completed] or [latest not completed], each
+    # in (started_at, id) order, first item. A completed run always wins.
+    earlier = make(db, repo_id, "udiff", {"t1", "t2", "t3"}, round_index=1, status=status)
+    hit = make(db, repo_id, "udiff", set(), round_index=1, provider=frozenset({"t1"}))
+    later = make(db, repo_id, "udiff", {"t1"}, round_index=1)
+    started(db, earlier, "2026-10-10T00:00:00.000Z")
+    started(db, hit, "2026-10-10T00:00:01.000Z")
+    started(db, later, "2026-10-10T00:00:02.000Z")
+    (group,) = build_matrix(db, [earlier, hit, later], expect=1).groups
+    assert group.runs[0].run_id == later  # clean completed beats an earlier unfinished run
+    (group,) = build_matrix(db, [earlier, hit], expect=1).groups
+    assert group.runs[0].run_id == hit  # completed with provider errors still beats unfinished
+    assert group.runs[0].status == "completed"
 
 
 def test_a_round_with_only_failed_runs_stays_e(db: sqlite3.Connection, repo_id: str) -> None:

@@ -11,8 +11,9 @@ so this reads the given runs one by one:
 - Runs carry the ``round`` of ``eval run --round``. A (format, round) pair can be retried,
   which adds a run with the same round. Each pair is one slot: the earliest completed run
   without provider errors, else the earliest completed run, else the latest run that did
-  not complete. The other runs of the slot are listed as superseded. A run without a round
-  is a slot of its own. ``expect`` counts completed slots per format, and the rounds
+  not complete, so a completed run always wins. The other runs of the slot are listed as
+  superseded. A run without a round is a slot of its own. Runs and slots are ordered by
+  start time, then run id, never by the order the ids were given in. ``expect`` counts completed slots per format, and the rounds
   ``1..expect`` missing from a format become ``missing`` slots.
 - Per task and slot a cell: ``1`` solved, ``0`` failed, ``P`` a provider error (HTTP 429,
   5xx, a timeout, retries used up: an attempt that ended ``error`` or ``timeout`` without a
@@ -266,30 +267,36 @@ def load_run(conn: sqlite3.Connection, run: EvalRun) -> MatrixRun:
     return MatrixRun(*common, cells, solved, provider, failures, near, flagged)
 
 
+def _order(run: MatrixRun) -> tuple[str, str]:
+    """Start time, then run id: ULIDs made in the same millisecond have a random order, so
+    the id only breaks ties, and the result never depends on the order of the given ids."""
+    return run.started_at, run.run_id or ""
+
+
 def _choose(runs: list[MatrixRun]) -> MatrixRun:
     """The run a slot uses: earliest completed without provider errors, else earliest
-    completed, else the latest run that did not complete."""
-    ordered = sorted(runs, key=lambda run: run.started_at)
+    completed, else the latest run that did not complete. A completed run always wins."""
+    ordered = sorted(runs, key=_order)
     clean = [run for run in ordered if run.complete and run.provider_errors == 0]
     done = [run for run in ordered if run.complete]
     return (clean or done or [ordered[-1]])[0]
 
 
 def _group(edit_format: str, runs: list[MatrixRun], tasks: list[str], expect: int) -> Group:
-    slots: dict[tuple[int, str], list[MatrixRun]] = {}
-    for run in sorted(runs, key=lambda r: r.started_at):
-        key = (run.round, "") if run.round is not None else (10**9, run.run_id or "")
+    slots: dict[tuple[int, str, str], list[MatrixRun]] = {}
+    for run in sorted(runs, key=_order):
+        key = (run.round, "", "") if run.round is not None else (10**9, *_order(run))
         slots.setdefault(key, []).append(run)
     rounds = {run.round for run in runs if run.round is not None}
     if rounds or not runs:
         for number in range(1, expect + 1):
             if number not in rounds:
                 missing = MatrixRun(None, edit_format, number, "missing", "", {}, None)
-                slots[(number, "")] = [missing]
+                slots[(number, "", "")] = [missing]
     else:
         for extra in range(expect - len(slots)):
             missing = MatrixRun(None, edit_format, None, "missing", "", {}, None)
-            slots[(10**9 + 1 + extra, "")] = [missing]
+            slots[(10**9 + 1 + extra, "", "")] = [missing]
     group = Group(edit_format, [])
     for key in sorted(slots):
         chosen = _choose(slots[key])
