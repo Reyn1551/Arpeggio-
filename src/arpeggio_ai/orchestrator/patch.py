@@ -72,11 +72,12 @@ TRUNCATION_EXPLAINS: frozenset[FailureReason] = frozenset({"patch_missing", "pat
 Ending = Literal["crlf", "lf", "mixed"]
 # How the model writes its change (M0.8). ``udiff`` is EXE-08; the others are experimental
 # and only reachable through ``arpeggio eval run --edit-format`` (orchestrator/edits.py).
-EditFormat = Literal["udiff", "search-replace"]
+EditFormat = Literal["udiff", "search-replace", "whole-file"]
 EDIT_FORMATS: tuple[EditFormat, ...] = get_args(EditFormat)
 PROMPT_FILES: dict[EditFormat, str] = {
     "udiff": "patch_system.txt",
     "search-replace": "edit_search_replace.txt",
+    "whole-file": "edit_whole_file.txt",
 }
 MAX_PATCH_BYTES = 200 * 1024
 LINE_ENDING_SHARE = 0.95

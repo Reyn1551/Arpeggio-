@@ -8,7 +8,7 @@ from gitrepo import link_directory, make_repo, run_git
 
 from arpeggio_ai.core.logs import configure_logging
 from arpeggio_ai.orchestrator.edits import EditPlan, apply_edits
-from arpeggio_ai.orchestrator.patch import PatchError
+from arpeggio_ai.orchestrator.patch import EditFormat, PatchError
 from arpeggio_ai.paths import logs_dir
 from arpeggio_ai.safety.process import scrubbed_env
 from arpeggio_ai.safety.worktree import Worktree, create_worktree
@@ -33,12 +33,18 @@ def tree(tmp_path: Path, home: Path) -> Worktree:
     )
 
 
-def apply(reply: str, tree: Worktree, home: Path, plans: list[EditPlan] | None = None) -> str:
+def apply(
+    reply: str,
+    tree: Worktree,
+    home: Path,
+    plans: list[EditPlan] | None = None,
+    edit_format: EditFormat = "search-replace",
+) -> str:
     return asyncio.run(
         apply_edits(
             reply,
             tree.path,
-            edit_format="search-replace",
+            edit_format=edit_format,
             attempt_id="01A",
             env=ENV,
             home=home,
@@ -47,9 +53,11 @@ def apply(reply: str, tree: Worktree, home: Path, plans: list[EditPlan] | None =
     )
 
 
-def failure(reply: str, tree: Worktree, home: Path) -> PatchError:
+def failure(
+    reply: str, tree: Worktree, home: Path, edit_format: EditFormat = "search-replace"
+) -> PatchError:
     with pytest.raises(PatchError) as caught:
-        apply(reply, tree, home)
+        apply(reply, tree, home, edit_format=edit_format)
     return caught.value
 
 
@@ -190,3 +198,68 @@ def test_a_failed_write_restores_what_was_written(
     assert error.reason == "patch_does_not_apply" and "disk full" in error.detail
     assert not (tree.path / "src" / "calc" / "extra.py").exists()
     assert_untouched(tree)
+
+
+# Whole files
+
+
+def whole(path: str, content: str, header: str = "FILE") -> str:
+    return f"{header}: {path}\n<<<<<<< CONTENT\n{content}>>>>>>> END\n"
+
+
+WHOLE_FIX = whole("src/calc/ops.py", "def add(a, b):\n    return a + b\n")
+
+
+def test_whole_file_is_written_and_committed(tree: Worktree, home: Path) -> None:
+    plans: list[EditPlan] = []
+    apply(WHOLE_FIX, tree, home, plans, edit_format="whole-file")
+    ops = tree.path / "src" / "calc" / "ops.py"
+    assert ops.read_bytes() == b"def add(a, b):\n    return a + b\n"
+    assert run_git(tree.path, "rev-parse", "HEAD^") == tree.base_sha
+    assert plans[0].shrink == 0.0
+
+
+def test_whole_file_unchanged_content_changes_nothing(tree: Worktree, home: Path) -> None:
+    reply = whole("src/calc/ops.py", "def add(a, b):\n    return a - b\n")
+    error = failure(reply, tree, home, "whole-file")
+    assert error.reason == "patch_does_not_apply" and "changed nothing" in error.detail
+    assert_untouched(tree)
+
+
+def test_whole_file_shrink_is_reported_not_refused(tree: Worktree, home: Path) -> None:
+    plans: list[EditPlan] = []
+    apply(whole("src/calc/ops.py", "# ...\n"), tree, home, plans, edit_format="whole-file")
+    assert plans[0].shrink == 0.5
+
+
+def test_whole_file_new_file_and_checks(tree: Worktree, home: Path) -> None:
+    reply = WHOLE_FIX + whole("src/calc/extra.py", "VALUE = 1\n", header="NEW FILE")
+    apply(reply, tree, home, edit_format="whole-file")
+    assert (tree.path / "src" / "calc" / "extra.py").read_bytes() == b"VALUE = 1\n"
+
+
+@pytest.mark.parametrize(
+    ("reply", "reason"),
+    [
+        (whole("src/Calc/ops.py", "x\n"), "patch_unknown_path"),
+        (whole("README.md", "x\n", header="NEW FILE"), "patch_malformed"),
+        (whole("../escape.py", "x\n", header="NEW FILE"), "patch_unsafe"),
+        (whole("README.md", "KEY = '[REDACTED:api_key]'\n"), "patch_writes_redacted_placeholder"),
+    ],
+)
+def test_whole_file_safety(tree: Worktree, home: Path, reply: str, reason: str) -> None:
+    assert failure(reply, tree, home, "whole-file").reason == reason
+    assert_untouched(tree)
+
+
+def test_whole_file_keeps_crlf_and_refuses_mixed(tmp_path: Path, home: Path) -> None:
+    home.mkdir(parents=True, exist_ok=True)
+    files = {"win.txt": "a\r\nb\r\n", "mixed.txt": "a\r\nb\nc\n"}
+    repo = make_repo(tmp_path / "repo", files)
+    tree = asyncio.run(
+        create_worktree(repo, home, task_id="01T", attempt_id="01A", attempt_seq=1, env=ENV)
+    )
+    error = failure(whole("mixed.txt", "x\n"), tree, home, "whole-file")
+    assert error.reason == "patch_mixed_line_endings"
+    apply(whole("win.txt", "a\nB\n"), tree, home, edit_format="whole-file")
+    assert (tree.path / "win.txt").read_bytes() == b"a\r\nB\r\n"

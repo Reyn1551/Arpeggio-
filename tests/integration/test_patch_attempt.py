@@ -675,6 +675,19 @@ def test_search_replace_fix_passes_and_stores_gits_diff(e2e: E2E) -> None:
     assert "edits: 1 file (line endings lf: 1), largest shrink 0%" in summaries
 
 
+def test_whole_file_fix_passes_and_reports_shrink(e2e: E2E) -> None:
+    reply = (
+        "FILE: src/calc/ops.py\n<<<<<<< CONTENT\ndef add(a, b):\n    return a + b\n>>>>>>> END\n"
+    )
+    provider = FakeProvider(ok(reply))
+    outcome = e2e.run(provider, edit_format="whole-file")
+    assert outcome.task_status == "awaiting_review"
+    system = json.loads(provider.requests[0].content)["messages"][0]["content"]
+    assert "<<<<<<< CONTENT" in system
+    summaries = [s.summary for s in e2e.steps(outcome)]
+    assert "edits: 1 file (line endings lf: 1), largest shrink 0%" in summaries
+
+
 def test_udiff_is_the_default_format(e2e: E2E) -> None:
     provider = FakeProvider(ok(FIX))
     assert e2e.run(provider).task_status == "awaiting_review"

@@ -245,3 +245,59 @@ def test_bytes_outside_the_match_never_change(
     assert out.startswith(head) and out.endswith(tail)
     middle = out[len(head) : len(out) - len(tail)]
     assert [content for content, _ in split_lines(middle)] == replace
+
+
+# Whole files
+
+
+def whole(path: str, content: str, header: str = "FILE") -> str:
+    return f"{header}: {path}\n<<<<<<< CONTENT\n{content}>>>>>>> END\n"
+
+
+def test_whole_file_prompt_is_packaged() -> None:
+    text = system_prompt("whole-file")
+    assert "<<<<<<< CONTENT" in text and ">>>>>>> END" in text and "rest unchanged" in text
+
+
+def test_whole_file_parse_keeps_divider_lines_as_content() -> None:
+    reply = "Done.\n\n" + whole("docs/a.md", "Title\n=======\n\n<<<<<<< SEARCH\n")
+    [only] = parse_edits(reply, "whole-file")
+    assert only.whole and only.search == ()
+    assert only.replace == ("Title", "=======", "", "<<<<<<< SEARCH")
+
+
+def test_whole_file_empty_content_is_allowed() -> None:
+    [only] = parse_edits(whole("a.txt", ""), "whole-file")
+    assert only.replace == ()
+
+
+def test_whole_file_twice_is_ambiguous() -> None:
+    with pytest.raises(PatchError) as got:
+        parse_edits(whole("a.py", "x\n") * 2, "whole-file")
+    assert got.value.reason == "patch_ambiguous" and "more than once" in got.value.detail
+
+
+@pytest.mark.parametrize(
+    ("reply", "reason"),
+    [
+        ("FILE: a.py\n<<<<<<< CONTENT\nx\n", "patch_malformed"),
+        ("FILE: a.py\n<<<<<<< CONTENT\n<<<<<<< CONTENT\n>>>>>>> END\n", "patch_malformed"),
+        (">>>>>>> END\n", "patch_malformed"),
+        ("FILE: a.py\n<<<<<<< SEARCH\nx\n=======\ny\n>>>>>>> REPLACE\n", "patch_malformed"),
+        ("No change needed.", "patch_missing"),
+    ],
+)
+def test_whole_file_structure(reply: str, reason: str) -> None:
+    with pytest.raises(PatchError) as caught:
+        parse_edits(reply, "whole-file")
+    assert caught.value.reason == reason
+
+
+def test_whole_file_redaction_names_the_new_line() -> None:
+    edits = parse_edits(whole("a.py", "x = 1\nKEY = '[REDACTED:api_key]'\n"), "whole-file")
+    assert redacted_replacements(edits) == ["a.py:line 2"]
+
+
+def test_search_replace_markers_outside_blocks_in_whole_file_are_prose() -> None:
+    reply = "Use ======= as a divider.\n" + whole("a.py", "x\n")
+    assert len(parse_edits(reply, "whole-file")) == 1

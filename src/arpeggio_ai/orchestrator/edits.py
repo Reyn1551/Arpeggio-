@@ -1,7 +1,7 @@
-"""Experimental edit formats for patch mode (M0.8): search/replace blocks.
+"""Experimental edit formats for patch mode (M0.8): search/replace blocks and whole files.
 
 Only ``arpeggio eval run --edit-format`` reaches this module. EXE-08 (``udiff``) stays the
-format of every other attempt. A reply holds blocks like::
+format of every other attempt. A ``search-replace`` reply holds blocks like::
 
     FILE: path/to/file.py
     <<<<<<< SEARCH
@@ -10,8 +10,22 @@ format of every other attempt. A reply holds blocks like::
     the lines that replace them
     >>>>>>> REPLACE
 
-``NEW FILE: path`` with an empty SEARCH creates a file. Files cannot be deleted or renamed.
-Text outside blocks is ignored, and so is one code-fence line right after the header.
+and a ``whole-file`` reply holds, at most once per path::
+
+    FILE: path/to/file.py
+    <<<<<<< CONTENT
+    the complete new file
+    >>>>>>> END
+
+``NEW FILE: path`` creates a file (with an empty SEARCH for search/replace). Files cannot
+be deleted or renamed. Text outside blocks is ignored, and so is one code-fence line right
+after the header. Inside a block only the format's own marker lines count, so a
+``=======`` line is ordinary content of a whole file.
+
+Whole files are written line by line with the file's class line break (``crlf`` or
+``lf``), always ending with a line break. A ``mixed`` file is ``patch_mixed_line_endings``
+because a rewrite would change its line breaks. Nothing checks that unchanged lines were
+copied: the plan reports the largest share of an existing file's lines that went away.
 
 Nothing is guessed. SEARCH is compared line by line with the file as it is in the worktree,
 each line exactly (indentation, trailing spaces, tabs), without its line break. It must
@@ -56,7 +70,12 @@ from arpeggio_ai.safety.worktree import git
 log = logging.getLogger(__name__)
 
 SEARCH, DIVIDER, REPLACE = "<<<<<<< SEARCH", "=======", ">>>>>>> REPLACE"
-MARKERS = (SEARCH, DIVIDER, REPLACE)
+CONTENT, END = "<<<<<<< CONTENT", ">>>>>>> END"
+# Marker lines per format, opening marker first and closing marker last.
+MARKERS: dict[EditFormat, tuple[str, ...]] = {
+    "search-replace": (SEARCH, DIVIDER, REPLACE),
+    "whole-file": (CONTENT, END),
+}
 _HEADER = re.compile(r"^(NEW FILE|FILE):[ \t]*(.*?)\s*$")
 _FENCE_LINE = re.compile(r"^ {0,3}(`{3,}|~{3,})[^`~]*$")
 LINE_BREAKS: dict[Ending, str] = {"crlf": "\r\n", "lf": "\n", "mixed": "\n"}
@@ -66,9 +85,10 @@ LINE_BREAKS: dict[Ending, str] = {"crlf": "\r\n", "lf": "\n", "mixed": "\n"}
 class Edit:
     path: str
     new: bool  # declared with NEW FILE:
-    search: tuple[str, ...]
-    replace: tuple[str, ...]
+    search: tuple[str, ...]  # empty for a new file and for whole-file
+    replace: tuple[str, ...]  # whole-file: the file's complete new content
     number: int  # 1-based position among the reply's blocks, for details
+    whole: bool = False  # whole-file: replace is the whole file
 
 
 @dataclass(frozen=True, slots=True)
@@ -78,13 +98,54 @@ class EditPlan:
     shrink: float  # largest share of an existing file's lines removed (0.0 if none)
 
 
-def _marker(line: str) -> str | None:
+def _marker(line: str, markers: tuple[str, ...]) -> str | None:
     stripped = line.rstrip()
-    return stripped if stripped in MARKERS else None
+    return stripped if stripped in markers else None
 
 
-def parse_edits(reply: str) -> list[Edit]:
-    """The search/replace blocks of ``reply``, checked for structure only."""
+def _block_lines(
+    lines: list[str], index: int, path: str, edit_format: EditFormat
+) -> tuple[list[list[str]], int]:
+    """The parts of the block whose opening marker is at ``index - 1``: SEARCH and REPLACE,
+    or the one CONTENT part. Returns them and the index after the closing marker."""
+    markers = MARKERS[edit_format]
+    closing = REPLACE if edit_format == "search-replace" else END
+    parts: list[list[str]] = [[]]
+    while True:
+        if index >= len(lines):
+            raise PatchError("patch_malformed", f"the block for {path} is not closed")
+        line = lines[index]
+        index += 1
+        marker = _marker(line, markers)
+        if marker is None:
+            parts[-1].append(line)
+        elif marker == DIVIDER and len(parts) == 1:
+            parts.append([])
+        elif marker == closing and len(parts) == len(markers) - 1:
+            return parts, index
+        else:
+            raise PatchError(
+                "patch_malformed", f"line {index}: unexpected {marker} in the block for {path}"
+            )
+
+
+def _check_block(edit: Edit) -> None:
+    where = f"block {edit.number}: {'NEW FILE' if edit.new else 'FILE'}: {edit.path}"
+    if edit.whole:
+        return
+    if edit.new and edit.search:
+        raise PatchError("patch_malformed", f"{where} needs an empty SEARCH")
+    if not edit.new and not edit.search:
+        raise PatchError("patch_malformed", f"{where} has an empty SEARCH")
+    if edit.search == edit.replace:
+        raise PatchError("patch_malformed", f"{where} changes nothing")
+
+
+def parse_edits(reply: str, edit_format: EditFormat = "search-replace") -> list[Edit]:
+    """The blocks of ``reply`` in ``edit_format``, checked for structure only."""
+    if edit_format not in MARKERS:
+        raise ValueError(f"no edit blocks in the {edit_format} format")
+    markers = MARKERS[edit_format]
     lines = [line.removesuffix("\r") for line in reply.split("\n")]
     edits: list[Edit] = []
     index = 0
@@ -93,7 +154,7 @@ def parse_edits(reply: str) -> list[Edit]:
         index += 1
         header = _HEADER.match(line)
         if header is None:
-            marker = _marker(line)
+            marker = _marker(line, markers)
             if marker is not None:
                 raise PatchError("patch_malformed", f"line {index}: {marker} outside a FILE: block")
             continue
@@ -102,56 +163,39 @@ def parse_edits(reply: str) -> list[Edit]:
             raise PatchError("patch_malformed", f"line {index}: {header.group(1)}: without a path")
         if index < len(lines) and _FENCE_LINE.match(lines[index]):
             index += 1
-        if index >= len(lines) or _marker(lines[index]) != SEARCH:
+        if index >= len(lines) or _marker(lines[index], markers) != markers[0]:
             raise PatchError(
                 "patch_malformed",
-                f"line {index}: {header.group(1)}: {path} is not followed by {SEARCH}",
+                f"line {index}: {header.group(1)}: {path} is not followed by {markers[0]}",
             )
-        index += 1
-        parts: list[list[str]] = [[], []]
-        part = 0
-        while True:
-            if index >= len(lines):
-                raise PatchError("patch_malformed", f"the block for {path} is not closed")
-            line = lines[index]
-            index += 1
-            marker = _marker(line)
-            if marker is None:
-                parts[part].append(line)
-            elif marker == DIVIDER and part == 0:
-                part = 1
-            elif marker == REPLACE and part == 1:
-                break
-            else:
-                raise PatchError(
-                    "patch_malformed", f"line {index}: unexpected {marker} in the block for {path}"
-                )
-        search, replace = tuple(parts[0]), tuple(parts[1])
-        number = len(edits) + 1
-        if new and search:
-            raise PatchError(
-                "patch_malformed", f"block {number}: NEW FILE: {path} needs an empty SEARCH"
-            )
-        if not new and not search:
-            raise PatchError("patch_malformed", f"block {number}: FILE: {path} has an empty SEARCH")
-        if search == replace:
-            raise PatchError("patch_malformed", f"block {number}: {path} changes nothing")
-        edits.append(Edit(path, new, search, replace, number))
+        parts, index = _block_lines(lines, index + 1, path, edit_format)
+        whole = edit_format == "whole-file"
+        search = () if whole else tuple(parts[0])
+        edit = Edit(path, new, search, tuple(parts[-1]), len(edits) + 1, whole)
+        _check_block(edit)
+        edits.append(edit)
     if not edits:
         raise PatchError("patch_missing", "the reply has no FILE: block")
-    created = [edit.path for edit in edits if edit.new]
-    for path in sorted(set(created)):
-        if created.count(path) > 1 or any(e.path == path and not e.new for e in edits):
-            raise PatchError(
-                "patch_ambiguous", f"{path} is declared as a new file and edited again"
+    paths = [edit.path for edit in edits]
+    for path in sorted(set(paths)):
+        mine = [edit for edit in edits if edit.path == path]
+        if len(mine) > 1 and (edit_format == "whole-file" or any(e.new for e in mine)):
+            what = (
+                "written more than once"
+                if edit_format == "whole-file"
+                else ("declared as a new file and edited again")
             )
+            raise PatchError("patch_ambiguous", f"{path} is {what}")
     return edits
 
 
 def redacted_replacements(edits: list[Edit]) -> list[str]:
-    """``path:block N line M`` for every replacement line holding a ``[REDACTED:`` marker."""
+    """``path:block N line M`` (whole-file: ``path:line M``, a line of the new file) for every
+    replacement line holding a ``[REDACTED:`` marker."""
     return [
-        f"{edit.path}:block {edit.number} line {number}"
+        f"{edit.path}:line {number}"
+        if edit.whole
+        else f"{edit.path}:block {edit.number} line {number}"
         for edit in edits
         for number, line in enumerate(edit.replace, start=1)
         if REDACTION_MARKER in line
@@ -282,7 +326,15 @@ async def plan_edits(
             # Context was redacted before it reached the model, so this SEARCH cannot match.
             log.warning("patch.touches_redacted_lines", extra={"paths": [path]})
         ending = classify_line_endings(data)
-        updated = edit_file(path, text, ending, mine)
+        if mine[0].whole:
+            if ending == "mixed":
+                raise PatchError(
+                    "patch_mixed_line_endings",
+                    f"{path} mixes CRLF and LF line endings; a rewrite would change them",
+                )
+            updated = "".join(line + LINE_BREAKS[ending] for line in mine[0].replace)
+        else:
+            updated = edit_file(path, text, ending, mine)
         contents[path] = updated.encode("utf-8")
         expected[path] = ending
         before, after = len(split_lines(text)), len(split_lines(updated))
@@ -326,9 +378,7 @@ async def apply_edits(
 
     ``on_planned`` receives the plan after every check passed and before anything is written.
     """
-    if edit_format != "search-replace":
-        raise ValueError(f"apply_edits does not handle {edit_format}")
-    edits = parse_edits(reply)
+    edits = parse_edits(reply, edit_format)
     plan = await plan_edits(edits, worktree, env=env, home=home)
     if on_planned is not None:
         on_planned(plan)
