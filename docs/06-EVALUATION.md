@@ -185,8 +185,10 @@ Eval runs spend money in a loop, so spend is capped before and during the run.
 ```text
 arpeggio eval run    [--strategy junior|middle|senior|arpeggio|all] [--split tuning|holdout|all]
                      [--id ID ...] [--repeats N] [--max-usd X] [--dry-run] [--allow-peak]
-                     [--keep-worktrees] [--sleep-between S] [--config PATH] [--json]
+                     [--keep-worktrees] [--sleep-between S] [--config PATH]
+                     [--edit-format udiff|search-replace|whole-file] [--json]
 arpeggio eval report [RUN_ID ...] [--json] [--markdown PATH] [--seed N]
+arpeggio eval matrix RUN_ID ... [--expect N] [--context-run ID ...] [--markdown PATH] [--json]
 arpeggio eval runs   [--json]
 ```
 
@@ -239,7 +241,7 @@ Remove-Item Env:DEEPSEEK_API_KEY
 
 `arpeggio eval report` takes run IDs, or by default the latest run per profile, split and strategy. It prints Rich tables and writes Markdown to `--markdown PATH`, by default `<evals dir>/.reports/baseline-<UTC timestamp>.md`. A path inside the Arpeggio checkout is refused: reports describe private tasks. `--json` prints the same data as one object.
 
-Sections are per profile and split. Holdout is labeled the headline. Tuning, and a mix of both, are labeled "not for claims". Per strategy: task runs, distinct tasks, solved, success rate, total cost, **cost per solved task**, mean attempts, escalations, wall-clock, quota wait, the share of cost that was estimated rather than reported by the provider, model mismatches, counterfactual cost and savings against it, and the skipped tasks with reasons. A second table counts attempts (not task runs, so an escalated task run can add several) per outcome: `output_truncated`, `patch_missing`, `patch_does_not_apply`, `patch_unknown_path`, `patch_malformed` (both M0.7) and `checks_failed` (a completed attempt with a failing check). Other `patch_*` reasons are not listed. It also gives the reasoning tokens and the reasoning share: reasoning tokens over the output tokens of the model calls whose provider reports `completion_tokens_details.reasoning_tokens`. Calls without that field are left out of both sides, and the share is `n/a` when no call reports it. The last column, context redactions, adds up the secret-scan findings redacted from the prompts of the patch attempts. The number is read from each prompt step's summary (`prompt: <n> context files, <m> items redacted`), so a change to that summary has to change the report too, and a test fails when the two drift apart. It is a metric only: it does not change the scan rules or the allowlist. A partial run is marked `PARTIAL` with its reason, and the section says that some planned task runs never ran.
+Sections are per profile and split. Holdout is labeled the headline. Tuning, and a mix of both, are labeled "not for claims". Per strategy: task runs, distinct tasks, solved, success rate, total cost, **cost per solved task**, mean attempts, escalations, wall-clock, quota wait, the share of cost that was estimated rather than reported by the provider, model mismatches, counterfactual cost and savings against it, and the skipped tasks with reasons. A second table counts attempts (not task runs, so an escalated task run can add several) per outcome: `output_truncated`, `patch_missing`, `patch_does_not_apply`, `patch_unknown_path`, `patch_malformed` (both M0.7), `patch_search_not_found`, `patch_search_ambiguous`, `patch_edit_overlap` (all three M0.8, edit formats only) and `checks_failed` (a completed attempt with a failing check). Other `patch_*` reasons are not listed. It also gives the reasoning tokens and the reasoning share: reasoning tokens over the output tokens of the model calls whose provider reports `completion_tokens_details.reasoning_tokens`. Calls without that field are left out of both sides, and the share is `n/a` when no call reports it. The last column, context redactions, adds up the secret-scan findings redacted from the prompts of the patch attempts. The number is read from each prompt step's summary (`prompt: <n> context files, <m> items redacted`), so a change to that summary has to change the report too, and a test fails when the two drift apart. It is a metric only: it does not change the scan rules or the allowlist. A partial run is marked `PARTIAL` with its reason, and the section says that some planned task runs never ran.
 
 Each section also breaks success rate and cost per solved task down by task tags: by `check:` tags, by `difficulty:` tags (or by category when no task has one) and by `stack:` tags (or by expected risk). Each group shows its number of tasks, and groups under 5 tasks are marked "indicative only". The Markdown report has one table per breakdown.
 
@@ -248,6 +250,20 @@ Each section also breaks success rate and cost per solved task down by task tags
 The four strategies run under at least the `free` and `micro` profiles (EVL-06). Per profile, the report gives solved tasks, cost, wall-clock time, and time spent waiting on quotas. Under `free`, `junior` means the strongest free model available, since there is no paid frontier model to use. Run each profile with `--config` into the same database, as above.
 
 Deferring eval runs to the cheapest upcoming window (CST-10) arrives in M1.11. Until then the peak warning above is the guard.
+
+### Edit-format experiment (M0.8)
+
+EXE-08 asks the model for one unified diff (`udiff`). M0.8 measures whether another way of writing the change solves more tasks. `--edit-format` on `eval run` picks the format for every attempt of the run. It is experimental: `arpeggio run` and every other path stay on `udiff`, and adopting another format needs an ADR and a change to EXE-08.
+
+- `search-replace`: blocks of `FILE: <path>`, `<<<<<<< SEARCH`, lines copied from the file, `=======`, the new lines, `>>>>>>> REPLACE`. SEARCH must match exactly once, line by line, and every block is matched against the original file. Bytes outside the matched lines stay as they are.
+- `whole-file`: `FILE: <path>`, `<<<<<<< CONTENT`, the complete new file, `>>>>>>> END`, at most once per path. The file gets its own class of line break.
+- `NEW FILE: <path>` creates a file in both formats. Neither can delete or rename a file.
+
+Each format has its own system prompt. The user message differs only in its checks line ("after your edits are applied"). The `udiff` prompt is pinned by a hash test, so the baseline is the M0.7 prompt. The reasons are in [the data model](04-DATA-MODEL.md).
+
+`arpeggio eval matrix RUN_ID ...` reads the runs one by one. It refuses runs that differ in strategy, split, profile, `config_hash` or `git_sha`, and runs with more than one repeat. It groups the runs by `edit_format` and writes solved per run and the mean per format, a task × run table (`1` solved, `0` failed, `E` error or no result, `S` skipped), the attempt outcomes per run, `whitespace_near_miss` counts, and the solved tasks whose edits removed more than 20% of an existing file's lines, for review by hand. A run that did not complete is `E` in every cell. `--expect N` (default 3) pads a format with `missing` runs that are `E`, so a run that failed before it got an id still shows. `--context-run ID` adds a run for context only (the M0.7 baseline, for example). It is not checked for consistency and does not count in the decision. The Markdown goes to `--markdown PATH`, by default `<evals dir>/.reports/matrix-<UTC timestamp>.md`, never into the Arpeggio checkout.
+
+The decision is fixed before any run. A candidate is accepted only if its mean solved exceeds the mean solved of the `udiff` runs in the same matrix by at least 2 tasks, and no task solved in a `udiff` run is unsolved in more than one of the candidate's runs. A format with fewer than `--expect` completed runs makes the verdict `incomplete`. The labels (`patch_*`, `checks_failed`) are diagnostics only. M0.8 runs on tuning only with `middle` on the `$0` route, and opens no holdout file.
 
 ## Statistics
 
