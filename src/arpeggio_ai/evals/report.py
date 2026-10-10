@@ -13,7 +13,9 @@ section every strategy gets:
 - counterfactual cost and savings against it (CST-05),
 - attempt outcomes (``FAILURE_KINDS``): attempts per ``failure_reason`` among
   ``output_truncated``, ``patch_missing``, ``patch_does_not_apply``,
-  ``patch_unknown_path`` and ``patch_malformed`` (M0.7), and ``checks_failed`` (a
+  ``patch_unknown_path`` and ``patch_malformed`` (M0.7), the edit-format reasons
+  ``patch_search_not_found``, ``patch_search_ambiguous`` and ``patch_edit_overlap``
+  (M0.8), and ``checks_failed`` (a
   completed attempt with a failing verdict). Counted per attempt, so an escalated task run
   can add several,
 - reasoning share: reasoning tokens over the output tokens of the model calls that report
@@ -57,6 +59,9 @@ FAILURE_KINDS = (
     "patch_does_not_apply",
     "patch_unknown_path",
     "patch_malformed",
+    "patch_search_not_found",
+    "patch_search_ambiguous",
+    "patch_edit_overlap",
     "checks_failed",
 )
 # The redaction count in the summary of a patch attempt's prompt step (orchestrator.attempts).

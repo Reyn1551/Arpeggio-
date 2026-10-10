@@ -383,14 +383,20 @@ def test_attempt_outcomes_and_reasoning_share(db: sqlite3.Connection, repo_id: s
         "patch_does_not_apply": 1,
         "patch_unknown_path": 1,
         "patch_malformed": 2,
+        "patch_search_not_found": 0,
+        "patch_search_ambiguous": 0,
+        "patch_edit_overlap": 0,
         "checks_failed": 1,
     }
     assert senior.reasoning_tokens == 4096 + 4000 + 100 + 300
     assert senior.reasoning_share == pytest.approx(8496 / (4096 + 4096 + 300 + 500 + 400))
     markdown = render_markdown(build_report(db, resamples=50))
     assert "### Attempt outcomes and reasoning" in markdown
-    assert "| senior | 2 | 1 | 1 | 1 | 2 | 1 | 8496 | 90% | 0 |" in markdown
-    assert "| `patch_unknown_path` | `patch_malformed` | `checks_failed` |" in markdown
+    assert "| senior | 2 | 1 | 1 | 1 | 2 | 0 | 0 | 0 | 1 | 8496 | 90% | 0 |" in markdown
+    assert (
+        "| `patch_unknown_path` | `patch_malformed` | `patch_search_not_found` |"
+        " `patch_search_ambiguous` | `patch_edit_overlap` | `checks_failed` |"
+    ) in markdown
 
 
 def test_reasoning_share_is_na_without_reports(db: sqlite3.Connection, repo_id: str) -> None:

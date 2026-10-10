@@ -272,3 +272,55 @@ def test_refused_run_has_no_run_id(suite: Path, model: Model) -> None:
     assert result.exit_code == 1
     out = json.loads(result.stdout)
     assert out["ok"] is False and "runs" not in out
+
+
+def test_matrix_end_to_end(
+    suite: Path, home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def handle(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        system, user = (m["content"] for m in body["messages"])
+        if "<<<<<<< CONTENT" in system:
+            reply = WHOLE_MUL if "product" in user else "No change needed."
+        else:
+            reply = mul_patch("a * b") if "product" in user else FIX_ADD
+        return ok(reply, usage=deepseek_usage(800, 0, 100), model=body["model"])
+
+    monkeypatch.setattr(evals_cli, "TRANSPORT", httpx.MockTransport(handle))
+    monkeypatch.setenv("DEEPSEEK_API_KEY", FAKE_KEY)
+    args = ["eval", "run", "--split", "tuning", "--strategy", "middle", "--max-usd", "0.4"]
+    ids = []
+    for edit_format in ("udiff", "whole-file", "udiff", "whole-file", "udiff"):
+        out = data(invoke(*args, "--edit-format", edit_format, "--json"))
+        assert out["status"] == "completed"
+        ids.append(out["runs"]["middle"])
+    # The third whole-file run failed: its id is not in the list, and the matrix shows it.
+    target = tmp_path / "matrix.md"
+    result = invoke("eval", "matrix", *ids, "--markdown", str(target), "--json")
+    assert result.exit_code == 0, result.stdout
+    matrix = data(result)
+    udiff, whole = matrix["groups"]
+    assert [r["solved"] for r in udiff["runs"]] == [2, 2, 2]
+    assert [(r["status"], r["solved"]) for r in whole["runs"]] == [
+        ("completed", 1),
+        ("completed", 1),
+        ("missing", None),
+    ]
+    (decision,) = matrix["decisions"]
+    assert decision["verdict"] == "incomplete"
+    text = target.read_text("utf-8")
+    assert "| whole-file #3 | `-` | missing | E |" in text
+    assert "| sample-fix-add | 1 | 1 | 1 | 0 | 0 | E |" in text
+    assert "patch_missing" in text
+    human = invoke("eval", "matrix", *ids, "--markdown", str(target))
+    assert "whole-file: solved per run 1, 1, E, mean 1.00" in human.stdout
+
+    conn = open_db(db_path(home))
+    try:
+        conn.execute("UPDATE eval_runs SET git_sha = ? WHERE id = ?", ("f" * 40, ids[1]))
+        conn.commit()
+    finally:
+        conn.close()
+    refused = invoke("eval", "matrix", *ids, "--markdown", str(target), "--json")
+    assert refused.exit_code == 1
+    assert "runs differ in git_sha" in data(refused)["errors"][0]["message"]

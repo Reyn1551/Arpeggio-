@@ -39,6 +39,8 @@ from arpeggio_ai.evals.budget import (
     peak_notices,
     run_limit,
 )
+from arpeggio_ai.evals.matrix import Matrix, build_matrix
+from arpeggio_ai.evals.matrix import render_markdown as render_matrix
 from arpeggio_ai.evals.report import (
     DEFAULT_SEED,
     FAILURE_KINDS,
@@ -671,6 +673,65 @@ def report_command(
                 markup=False,
             )
     out.print(f"\nMarkdown: {target}", markup=False)
+
+
+@app.command("matrix")
+def matrix_command(
+    ctx: typer.Context,
+    run_ids: Annotated[list[str], typer.Argument(help="Eval run IDs of the experiment.")],
+    expect: Annotated[
+        int, typer.Option("--expect", min=1, help="Runs expected per edit format.")
+    ] = 3,
+    context_ids: Annotated[
+        list[str] | None,
+        typer.Option("--context-run", help="Run shown for context only (repeatable)."),
+    ] = None,
+    markdown: Annotated[
+        Path | None,
+        typer.Option("--markdown", help="Markdown file (default <evals>/.reports/matrix-<ts>.md)."),
+    ] = None,
+    json_flag: JsonOption = False,
+) -> None:
+    """Solved per run and edit format, and the M0.8 decision against the udiff runs."""
+    as_json = json_mode(ctx, json_flag)
+
+    def action() -> tuple[Matrix, Path]:
+        home = arpeggio_home()
+        if not db_path(home).exists():
+            raise ValueError("no database yet: run `arpeggio eval run` first")
+        root = suite_root()
+        target = markdown or root / REPORTS_DIR / f"matrix-{now_utc():%Y%m%dT%H%M%SZ}.md"
+        target = target.expanduser().absolute()
+        checkout = _arpeggio_checkout()
+        if checkout is not None and target.resolve().is_relative_to(checkout):
+            raise ValueError(
+                f"reports never go into the Arpeggio repo ({checkout}); write them under {root}"
+            )
+        conn = open_db(db_path(home))
+        try:
+            matrix = build_matrix(conn, run_ids, expect=expect, context_ids=context_ids or [])
+        finally:
+            conn.close()
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(render_matrix(matrix), encoding="utf-8", newline="\n")
+        return matrix, target
+
+    matrix, target = run_command(as_json, action)
+    if as_json:
+        emit_json({"ok": True, "markdown": str(target), **matrix.to_dict()})
+        return
+    out = console()
+    for group in matrix.groups:
+        solved = ", ".join("E" if r.solved is None else str(r.solved) for r in group.runs)
+        mean = "n/a" if group.mean_solved is None else f"{group.mean_solved:.2f}"
+        out.print(f"{group.edit_format}: solved per run {solved}, mean {mean}", markup=False)
+    for decision in matrix.decisions:
+        out.print(
+            f"{decision.edit_format}: {decision.verdict}: {'; '.join(decision.reasons)}",
+            style="bold green" if decision.verdict == "accepted" else "bold yellow",
+            markup=False,
+        )
+    out.print(f"Markdown: {target}", markup=False)
 
 
 @app.command("runs")
