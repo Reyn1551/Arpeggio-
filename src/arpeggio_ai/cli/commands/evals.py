@@ -39,7 +39,14 @@ from arpeggio_ai.evals.budget import (
     peak_notices,
     run_limit,
 )
-from arpeggio_ai.evals.matrix import Matrix, build_matrix
+from arpeggio_ai.evals.matrix import (
+    Matrix,
+    build_matrix,
+    edit_format_of,
+    matching_runs,
+    parse_since,
+    round_of,
+)
 from arpeggio_ai.evals.matrix import render_markdown as render_matrix
 from arpeggio_ai.evals.report import (
     DEFAULT_SEED,
@@ -414,6 +421,10 @@ def run_command_(
             help="Experimental (M0.8): how the model writes its change. udiff is EXE-08.",
         ),
     ] = "udiff",
+    round_index: Annotated[
+        int | None,
+        typer.Option("--round", min=1, help="Experiment round stored on the run (M0.8)."),
+    ] = None,
     json_flag: JsonOption = False,
 ) -> None:
     """Run the baseline strategies on the eval suite (spends money unless --dry-run)."""
@@ -451,9 +462,12 @@ def run_command_(
                     at=at,
                     overhead=overhead,
                     edit_format=edit_format,
+                    round_index=round_index,
                 )
             )
             notices = peak_notices(plan.route_keys(), at)
+            env = scrubbed_env()
+            sha = asyncio.run(harness_sha(env))
             month = f"{at:%Y-%m}"
             spent = 0.0 if conn is None else month_eval_spend_usd(conn, month)
             monthly = global_config.budget.eval_per_month_usd
@@ -476,6 +490,8 @@ def run_command_(
                 ],
                 "peak_message": peak_message(notices) if notices else None,
                 "dry_run": dry_run,
+                "git_sha": sha,
+                "config_hash": config_hash(global_config),
                 "plan_lines": _plan_lines(plan),
             }
             if dry_run:
@@ -493,7 +509,6 @@ def run_command_(
                     config=config, transport=TRANSPORT, prompt_overhead=overhead_history(conn)
                 )
 
-            env = scrubbed_env()
             runner = EvalRunner(
                 conn,
                 ArtifactStore(artifacts_dir(home)),
@@ -501,7 +516,7 @@ def run_command_(
                 evals_root=root,
                 context_for=context_for,
                 cap=SpendCap(limit),
-                git_sha=asyncio.run(harness_sha(env)),
+                git_sha=sha,
                 config_hash=config_hash(global_config),
                 profile=global_config.budget.profile,
                 keep_worktrees=keep_worktrees,
@@ -735,18 +750,42 @@ def matrix_command(
 
 
 @app.command("runs")
-def runs_command(ctx: typer.Context, json_flag: JsonOption = False) -> None:
-    """List recorded eval runs."""
+def runs_command(
+    ctx: typer.Context,
+    strategy: Annotated[
+        str | None, typer.Option("--strategy", help="Only runs of this strategy.")
+    ] = None,
+    git_sha: Annotated[
+        str | None, typer.Option("--git-sha", help="Only runs of this Arpeggio commit.")
+    ] = None,
+    config_hash_: Annotated[
+        str | None, typer.Option("--config-hash", help="Only runs with this config hash.")
+    ] = None,
+    since: Annotated[
+        str | None,
+        typer.Option("--since", help="Only runs started at or after this ISO-8601 UTC time."),
+    ] = None,
+    json_flag: JsonOption = False,
+) -> None:
+    """List recorded eval runs, optionally filtered (M0.8 reconciles its run ids this way)."""
     as_json = json_mode(ctx, json_flag)
 
     def action() -> list[dict[str, Any]]:
+        moment = parse_since(since) if since is not None else None
         path = db_path(arpeggio_home())
         if not path.exists():
             return []
         conn = open_db(path)
         try:
             rows = []
-            for run in list_eval_runs(conn):
+            runs = matching_runs(
+                list_eval_runs(conn),
+                strategy=strategy,
+                git_sha=git_sha,
+                config_hash=config_hash_,
+                since=moment,
+            )
+            for run in runs:
                 results = list_eval_results(conn, run.id)
                 done = [r for r in results if r.status != "skipped"]
                 rows.append(
@@ -757,6 +796,10 @@ def runs_command(ctx: typer.Context, json_flag: JsonOption = False) -> None:
                         "split": run.split,
                         "status": run.status,
                         "status_reason": run.status_reason,
+                        "git_sha": run.git_sha,
+                        "config_hash": run.config_hash,
+                        "edit_format": edit_format_of(run),
+                        "round": round_of(run),
                         "started_at": run.started_at,
                         "task_runs": len(done),
                         "solved": sum(r.solved for r in done),

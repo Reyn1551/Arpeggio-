@@ -324,3 +324,102 @@ def test_matrix_end_to_end(
     refused = invoke("eval", "matrix", *ids, "--markdown", str(target), "--json")
     assert refused.exit_code == 1
     assert "runs differ in git_sha" in data(refused)["errors"][0]["message"]
+
+
+# M0.8 script support: ids from the database, provider errors, retried rounds
+
+
+class Switchable:
+    """Answers like ``Model``, or with HTTP 429 and a Retry-After over max_quota_wait_s."""
+
+    def __init__(self) -> None:
+        self.limited = False
+
+    def handle(self, request: httpx.Request) -> httpx.Response:
+        if self.limited:
+            return httpx.Response(429, json={"error": {}}, headers={"Retry-After": "99999"})
+        body = json.loads(request.content)
+        user = next(m["content"] for m in body["messages"] if m["role"] == "user")
+        reply = mul_patch("a * b") if "product" in user else FIX_ADD
+        return ok(reply, usage=deepseek_usage(800, 0, 100), model=body["model"])
+
+
+@pytest.fixture
+def switchable(monkeypatch: pytest.MonkeyPatch) -> Switchable:
+    fake = Switchable()
+    monkeypatch.setattr(evals_cli, "TRANSPORT", httpx.MockTransport(fake.handle))
+    monkeypatch.setenv("DEEPSEEK_API_KEY", FAKE_KEY)
+    return fake
+
+
+RUN = ["eval", "run", "--split", "tuning", "--strategy", "middle", "--max-usd", "0.4"]
+
+
+def test_run_json_names_sha_config_and_round(suite: Path) -> None:
+    dry = data(invoke(*RUN, "--round", "2", "--dry-run", "--json"))
+    assert len(dry["git_sha"]) == 40 or dry["git_sha"].startswith("unknown-")
+    assert len(dry["config_hash"]) == 16 and dry["plan"]["round"] == 2
+    assert invoke(*RUN, "--round", "0", "--dry-run").exit_code == 2
+
+
+def test_runs_are_reconciled_from_the_database(
+    suite: Path, switchable: Switchable, home: Path, tmp_path: Path
+) -> None:
+    before = data(invoke(*RUN, "--json"))  # an earlier run: excluded by --since
+    conn = open_db(db_path(home))
+    try:
+        conn.execute(
+            "UPDATE eval_runs SET started_at = '2026-01-01T00:00:00.000Z' WHERE id = ?",
+            (before["runs"]["middle"],),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    other = tmp_path / "other.toml"
+    changed = template("micro-deepseek").replace(
+        "max_quota_wait_s    = 120", "max_quota_wait_s = 121"
+    )
+    other.write_bytes((changed + OPT_IN).encode("utf-8"))  # a value, not a comment: new hash
+    since = "2026-06-01T00:00:00.000Z"
+    first = data(invoke(*RUN, "--round", "1", "--json"))
+    second = data(invoke(*RUN, "--round", "2", "--edit-format", "whole-file", "--json"))
+    data(invoke(*RUN, "--config", str(tmp_path / "other.toml"), "--json"))
+    args = ["--strategy", "middle", "--git-sha", first["git_sha"]]
+    args += ["--config-hash", first["config_hash"], "--since", since, "--json"]
+    rows = data(invoke("eval", "runs", *args))["runs"]
+    assert [r["id"] for r in rows] == [first["runs"]["middle"], second["runs"]["middle"]]
+    assert [(r["edit_format"], r["round"]) for r in rows] == [("udiff", 1), ("whole-file", 2)]
+    assert {r["config_hash"] for r in rows} == {first["config_hash"]}
+    everything = data(invoke("eval", "runs", "--json"))["runs"]
+    assert len(everything) == 4
+    bad = invoke("eval", "runs", "--since", "2026-06-01T00:00:00", "--json")
+    assert bad.exit_code == 1 and "needs a timezone" in data(bad)["errors"][0]["message"]
+
+
+def test_provider_errors_and_a_retried_round_in_the_matrix(
+    suite: Path, switchable: Switchable, tmp_path: Path
+) -> None:
+    ids = [data(invoke(*RUN, "--round", str(n), "--json"))["runs"]["middle"] for n in (1, 2)]
+    switchable.limited = True
+    limited = data(invoke(*RUN, "--round", "3", "--json"))
+    assert limited["status"] == "completed"  # the run completed; its tasks hit 429
+    ids.append(limited["runs"]["middle"])
+    target = tmp_path / "m.md"
+    matrix = data(invoke("eval", "matrix", *ids, "--markdown", str(target), "--json"))
+    (udiff,) = matrix["groups"]
+    hit = udiff["runs"][2]
+    assert hit["provider_errors"] == 2 and set(hit["cells"].values()) == {"P"}
+    assert sum(hit["failures"].values()) == 0 and hit["solved"] == 0
+    assert [r["solved"] for r in udiff["runs"]] == [2, 2, 0]
+
+    switchable.limited = False
+    ids.append(data(invoke(*RUN, "--round", "3", "--json"))["runs"]["middle"])
+    matrix = data(invoke("eval", "matrix", *ids, "--markdown", str(target), "--json"))
+    (udiff,) = matrix["groups"]
+    assert [(r["round"], r["solved"], r["provider_errors"]) for r in udiff["runs"]] == [
+        (1, 2, 0),
+        (2, 2, 0),
+        (3, 2, 0),
+    ]
+    assert [s["run_id"] for s in udiff["superseded"]] == [limited["runs"]["middle"]]
+    assert "udiff r4" not in target.read_text("utf-8")

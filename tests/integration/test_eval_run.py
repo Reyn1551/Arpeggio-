@@ -376,6 +376,7 @@ def test_edit_format_is_stored_on_completed_and_aborted_runs(h: RunHarness) -> N
     assert plan.edit_format == "udiff"
     h.run(plan)
     plan.edit_format = "search-replace"
+    plan.round_index = 2
 
     def broken(config: object) -> object:
         raise RuntimeError("context failed")
@@ -399,4 +400,5 @@ def test_edit_format_is_stored_on_completed_and_aborted_runs(h: RunHarness) -> N
     done, aborted = list_eval_runs(h.conn)
     assert done.status == "completed" and done.summary is not None
     assert done.summary["edit_format"] == "udiff"
-    assert aborted.status == "aborted" and aborted.summary == {"edit_format": "search-replace"}
+    assert aborted.status == "aborted"
+    assert aborted.summary == {"edit_format": "search-replace", "round": 2}

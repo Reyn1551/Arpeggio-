@@ -18,6 +18,8 @@ not escalate. Worktrees are removed after each attempt unless ``keep_worktrees``
 ``edit_format`` (M0.8, experimental) is how every attempt of the run asks the model to
 write its change. It is stored in each attempt's ``route_reason`` and in the eval run's
 ``summary``, also for an aborted run, so ``eval matrix`` can group runs by it.
+``round_index`` (``--round``) is stored there the same way: a retried (format, round)
+pair is a new run with the same round.
 """
 
 import asyncio
@@ -133,6 +135,7 @@ class RunPlan:
     at: datetime
     policy_source: str
     edit_format: EditFormat = "udiff"
+    round_index: int | None = None  # --round of the M0.8 experiment
 
     def strategy_estimate_usd(self, strategy: Strategy) -> float:
         total = sum(
@@ -163,6 +166,7 @@ class RunPlan:
             "split": self.split,
             "repeats": self.repeats,
             "edit_format": self.edit_format,
+            "round": self.round_index,
             "planned_task_runs": self.planned,
             "estimate_usd": self.estimate_usd,
             "estimate_per_strategy_usd": {
@@ -224,12 +228,15 @@ async def build_plan(
     at: datetime,
     overhead: OverheadFor = lambda provider, model: 0,
     edit_format: EditFormat = "udiff",
+    round_index: int | None = None,
 ) -> RunPlan:
     """Select runnable tasks and plan every strategy's routes and worst-case cost."""
     if repeats < 1:
         raise EvalRunError("--repeats must be >= 1")
     checks = latest_checks(evals_root)
-    plan = RunPlan([], [], strategies, repeats, split, at, policy_source, edit_format)
+    plan = RunPlan(
+        [], [], strategies, repeats, split, at, policy_source, edit_format, round_index
+    )
     for entry in entries:
         status = run_status(entry, evals_root, checks)
         if status != "valid" or entry.task is None:
@@ -395,7 +402,7 @@ class EvalRunner:
                     run.id,
                     "aborted",
                     reason=type(error).__name__,
-                    summary={"edit_format": plan.edit_format},
+                    summary={"edit_format": plan.edit_format, "round": plan.round_index},
                 )
             raise
         status: EvalRunStatus = "partial" if self.cap.stopped else "completed"
@@ -414,6 +421,7 @@ class EvalRunner:
                 summary={
                     "spent_usd": round(self.cap.spent_usd, 8),
                     "edit_format": plan.edit_format,
+                    "round": plan.round_index,
                 },
             )
             for strategy, run in runs.items()
