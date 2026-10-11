@@ -32,6 +32,15 @@ Requirement IDs (`CFG-01`, `EXE-08`, `EVL-05`, …) refer to
   scanner, the hidden-test guard and the approval gate are unchanged, and `patch_unknown_path`
   still means "absent from the base commit". A diff may touch a file the selector left out.
 
+### Fixed — M0.9 Context selection
+
+- Secret-looking files (`.env`, `*.pem`, …) and `.git` internals are never chosen as
+  automatic context: `read_context` would refuse them at runtime, so selecting them only
+  wasted a slot and the byte budget. One shared predicate pins this on the planning path
+  and the worktree path alike (EXE-08, SAF-02).
+- The `manual` estimate uses the same predicate, so refused secret and `.git` entries in
+  a hand-written `context_files` list no longer inflate the run's worst-case cost (EVL-05).
+
 ## [0.0.1] — 2026-10-10
 
 Everything below is the v0 line: "a store, one adapter, and a real baseline. Nothing smart yet."

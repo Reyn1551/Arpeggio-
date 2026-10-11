@@ -175,12 +175,14 @@ def test_secret_files_are_never_selected_on_either_path(tmp_path: Path) -> None:
 
 
 def test_context_bytes_skips_files_read_context_would_refuse(tmp_path: Path) -> None:
-    """The manual estimate counts exactly what the attempt will read.
+    """Refused paths count 0 in the manual estimate.
 
     ``context_bytes`` prices a hand-written ``context_files`` list. A tracked secret in
     that list is refused by ``read_context`` at runtime, so counting its bytes prices a
     prompt the attempt never sends — the conservative direction of the same defect the
-    ``auto`` paths fixed with ``selectable``.
+    ``auto`` paths fixed with ``selectable``. Other unreadable entries (a non-UTF-8 blob,
+    a directory) still count their bytes, so the estimate stays an upper bound there;
+    those come from the author's own listing, not the selector.
     """
     files = dict(FILES)
     files[".env"] = "TOKEN=placeholder\n"
