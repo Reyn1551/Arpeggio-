@@ -145,8 +145,11 @@ context selection.
 
 ### Verified
 
-- 1420 tests pass, 4 skipped (POSIX-only, on Windows), `ruff check`, `ruff format --check` and
-  `mypy --strict` clean.
+- 1423 tests pass, 4 skipped under the CI command (the skips are POSIX-only, on Windows),
+  `ruff check`, `ruff format --check` and `mypy --strict` clean, coverage 96.52% against an 80%
+  gate. CI runs the same checks on Ubuntu, macOS and Windows.
+- When this entry was written the tree held 1420 tests; the M0.8 merge added three more, and the
+  number above is the one measured on the released revision.
 
 [Unreleased]: https://github.com/Reyn1551/Arpeggio-/compare/v0.0.1...HEAD
 [0.0.1]: https://github.com/Reyn1551/Arpeggio-/releases/tag/v0.0.1
