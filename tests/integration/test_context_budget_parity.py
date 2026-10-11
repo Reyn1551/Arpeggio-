@@ -15,7 +15,12 @@ from gitrepo import FILES, make_repo, run_git
 
 from arpeggio_ai.evals.budget import prompt_chars, selected_context_paths
 from arpeggio_ai.evals.task import EvalTask
-from arpeggio_ai.orchestrator.patch import CONTEXT_MAX_FILES, build_prompt, select_context
+from arpeggio_ai.orchestrator.patch import (
+    CONTEXT_CAP_BYTES,
+    CONTEXT_MAX_FILES,
+    build_prompt,
+    select_context,
+)
 
 ENV = dict(os.environ)
 REQUEST = "Fix the bug in src/calc/ops.py so that calc.add adds instead of subtracting."
@@ -50,6 +55,28 @@ def test_planned_selection_respects_the_same_caps(repo: Path) -> None:
     assert len(planned) <= CONTEXT_MAX_FILES
 
 
+def test_the_file_cap_binds_on_both_paths(tmp_path: Path) -> None:
+    """A repository with more matching files than the cap, so the cap is what stops the list.
+
+    Without this the fixture is smaller than ``CONTEXT_MAX_FILES`` and both paths could drop the
+    cap entirely and still pass: the estimate would then price a prompt the attempt never sends.
+    """
+    files = dict(FILES)
+    # Enough files named in the request to exceed the cap several times over.
+    for n in range(CONTEXT_MAX_FILES * 3):
+        files[f"mods/ops{n}.py"] = f"def helper{n}(a):\n    return a + {n}\n"
+    # The request names "ops", so all of these score above the noise floor.
+    request = "Fix the bug in mods/ops0.py so that ops helper adds instead of subtracting."
+    big = make_repo(tmp_path / "big", files)
+    planned = asyncio.run(
+        selected_context_paths(big, _base(big), request, hidden=frozenset(), env=ENV, home=big)
+    )
+    in_worktree = asyncio.run(select_context(big, request, env=ENV, home=big))
+    assert len(in_worktree) == CONTEXT_MAX_FILES, "the cap must be what stopped the worktree list"
+    assert len(planned) == CONTEXT_MAX_FILES, "the estimate must apply the same cap"
+    assert planned == in_worktree
+
+
 def test_planned_selection_excludes_hidden_paths(repo: Path) -> None:
     """A hidden test is not a candidate when planning, so it cannot be estimated or sent."""
     planned = asyncio.run(
@@ -71,6 +98,31 @@ def test_planned_selection_on_a_bad_base_is_empty(repo: Path) -> None:
         selected_context_paths(repo, "0" * 40, REQUEST, hidden=frozenset(), env=ENV, home=repo)
     )
     assert planned == []
+
+
+def test_the_byte_cap_binds_on_both_paths(tmp_path: Path) -> None:
+    """A repository whose matching files exceed the byte cap, so bytes stop the list.
+
+    The other parity tests use files of a few dozen bytes, so ``limit_bytes`` never binds and
+    both paths could raise it without a test noticing; the estimate would then price a prompt
+    the attempt never sends.
+    """
+    files = dict(FILES)
+    # Each file is well over a third of the cap, so at most a couple can fit.
+    filler = "\n".join(f"# padding line {n} to make this file large" for n in range(2000))
+    for n in range(4):
+        files[f"mods/ops{n}.py"] = f"def helper{n}(a):\n    return a + {n}\n{filler}\n"
+    request = "Fix the bug in mods/ops0.py so that ops helper adds instead of subtracting."
+    big = make_repo(tmp_path / "heavy", files)
+    in_worktree = asyncio.run(select_context(big, request, env=ENV, home=big))
+    planned = asyncio.run(
+        selected_context_paths(big, _base(big), request, hidden=frozenset(), env=ENV, home=big)
+    )
+    assert planned == in_worktree
+    # The cap must be what limited the result, not the number of candidates.
+    assert len(in_worktree) < 4, "the byte cap must have excluded at least one candidate"
+    total = sum((big / path).stat().st_size for path in in_worktree)
+    assert total <= CONTEXT_CAP_BYTES
 
 
 def test_prompt_chars_uses_the_selected_paths_not_the_task_list(repo: Path) -> None:
