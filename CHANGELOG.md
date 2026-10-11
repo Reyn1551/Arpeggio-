@@ -13,7 +13,24 @@ Requirement IDs (`CFG-01`, `EXE-08`, `EVL-05`, …) refer to
 
 ## [Unreleased]
 
-Nothing yet.
+### Added — M0.9 Context selection
+
+- A deterministic, rule-based context selector scores a repository's tracked files against the
+  task's request and returns the best that fit a byte and file cap. No model call, no network,
+  no randomness ([ADR-0011](docs/adr/0011-context-selection.md)).
+- `arpeggio eval run --context-selection manual|auto` picks how an attempt's prompt file list is
+  built. The default stays `manual`, so nothing changes unless it is asked for. The choice is
+  stored on the run next to `edit_format` and shown by `eval runs` (EXE-08, EVL-05).
+- An `auto` run's worst-case cost estimate is computed the same way, from `base` with
+  `git ls-tree`, so the estimate describes the prompt the attempt will really send (EVL-05).
+- `arpeggio eval matrix` groups by edit format and context selection. `manual` keeps its plain
+  label so earlier reports still read, and an `auto` group is scored against the manual runs.
+
+### Changed — M0.9 Context selection
+
+- The selector chooses what is **shown**, never what is **allowed**: the worktree, the secret
+  scanner, the hidden-test guard and the approval gate are unchanged, and `patch_unknown_path`
+  still means "absent from the base commit". A diff may touch a file the selector left out.
 
 ## [0.0.1] — 2026-10-10
 

@@ -223,8 +223,18 @@ def test_dry_run_shows_the_edit_format(suite: Path) -> None:
     assert data(invoke(*args, "--json"))["plan"]["edit_format"] == "udiff"
     out = data(invoke(*args, "--edit-format", "whole-file", "--json"))
     assert out["plan"]["edit_format"] == "whole-file"
-    assert "edit format whole-file:" in invoke(*args, "--edit-format", "whole-file").stdout
+    assert "edit format whole-file," in invoke(*args, "--edit-format", "whole-file").stdout
     assert invoke(*args, "--edit-format", "fuzzy").exit_code == 2
+
+
+def test_dry_run_shows_the_context_selection(suite: Path) -> None:
+    """M0.9: the flag defaults to manual, and auto is echoed in the plan and the header."""
+    args = ["eval", "run", "--split", "tuning", "--dry-run"]
+    assert data(invoke(*args, "--json"))["plan"]["context_selection"] == "manual"
+    out = data(invoke(*args, "--context-selection", "auto", "--json"))
+    assert out["plan"]["context_selection"] == "auto"
+    assert "context selection auto:" in invoke(*args, "--context-selection", "auto").stdout
+    assert invoke(*args, "--context-selection", "fuzzy").exit_code == 2
 
 
 def test_run_json_exposes_the_run_id_per_strategy(

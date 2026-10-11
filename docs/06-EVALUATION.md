@@ -186,7 +186,8 @@ Eval runs spend money in a loop, so spend is capped before and during the run.
 arpeggio eval run    [--strategy junior|middle|senior|arpeggio|all] [--split tuning|holdout|all]
                      [--id ID ...] [--repeats N] [--max-usd X] [--dry-run] [--allow-peak]
                      [--keep-worktrees] [--sleep-between S] [--config PATH]
-                     [--edit-format udiff|search-replace|whole-file] [--round N] [--json]
+                     [--edit-format udiff|search-replace|whole-file]
+                     [--context-selection manual|auto] [--round N] [--json]
 arpeggio eval report [RUN_ID ...] [--json] [--markdown PATH] [--seed N]
 arpeggio eval matrix RUN_ID ... [--expect N] [--context-run ID ...] [--markdown PATH] [--json]
 arpeggio eval runs   [--strategy S] [--git-sha SHA] [--config-hash H] [--since TIME] [--json]
@@ -266,6 +267,23 @@ Each format has its own system prompt. The user message differs only in its chec
 `arpeggio eval matrix RUN_ID ...` reads the runs one by one. It refuses runs that differ in strategy, split, profile, `config_hash` or `git_sha`, and runs with more than one repeat. It groups the runs by `edit_format`. Within a format each round is one slot, because a failed (format, round) pair can be retried as a new run with the same `--round`. A slot uses its earliest completed run without provider errors, else its earliest completed run, else its latest run that did not complete. The other runs of the slot are listed as superseded, so a retry never adds a fourth column. Within a slot, runs are ordered by (`started_at`, `run_id`), so runs started in the same millisecond keep the order of their ids, not the order they were created in. A run without a round is a slot of its own. The matrix writes solved per slot and the mean per format, a task × slot table (`1` solved, `0` failed, `P` provider error, `E` other error or no result, `S` skipped), the attempt outcomes per slot, `whitespace_near_miss` counts, and the solved tasks whose edits removed more than 20% of an existing file's lines, for review by hand. A provider error is an attempt that ended `error` or `timeout` without a `failure_reason`: HTTP 429 or 5xx, retries used up, or a timeout. It has its own column and is neither a format label nor `checks_failed`. A run that did not complete is `E` in every cell. `--expect N` (default 3) counts completed slots per format and adds the rounds `1..N` a format lacks as `missing` slots that are `E`, so a run that failed before it got an id still shows. `--context-run ID` adds a run for context only (the M0.7 baseline, for example). It is not checked for consistency and does not count in the decision, and the context table says whether its `config_hash` matches the matrix (`match` or `mismatch`). The Markdown goes to `--markdown PATH`, by default `<evals dir>/.reports/matrix-<UTC timestamp>.md`, never into the Arpeggio checkout.
 
 The decision is fixed before any run. A candidate is accepted only if its mean solved exceeds the mean solved of the `udiff` runs in the same matrix by at least 2 tasks, and no task solved in a `udiff` run is unsolved in more than one of the candidate's runs. It reads solved cells only. A format with fewer than `--expect` completed slots makes the verdict `incomplete`. The labels (`patch_*`, `checks_failed`) and provider errors are diagnostics only. M0.8 runs on tuning only with `middle` on the `$0` route, and opens no holdout file.
+
+### Context-selection experiment (M0.9)
+
+By default an attempt is shown exactly the paths in the task's `context_files`. That list is hand-written, and a task that forgets a file fails as `patch_unknown_path` however good the model is, so a harness limitation can look like a model failure ([ADR-0011](adr/0011-context-selection.md)).
+
+`--context-selection` on `eval run` picks how the prompt's file list is built. It is experimental and defaults to `manual`, so nothing changes until it is asked for.
+
+- `manual`: each task's own `context_files`, as before.
+- `auto`: the base commit's tracked files, ranked against the task's `request` by `orchestrator.context.rank`. It is deterministic: no model call, no network, no randomness. Weights favour a basename named exactly in the request (100), then a basename mentioned (40), a stem (25), a directory (12), a path (8) and an uncommon extension (4); depth, vendor directories and test files are penalised. Caps match the prompt path: 100 KB and 8 files. A request that names nothing selects nothing.
+
+`auto` chooses what is **shown**, not what is **allowed**. The worktree, the secret scanner, the hidden-test guard and the approval gate are untouched, and `patch_unknown_path` still means "absent from the base commit". A diff may therefore touch a file the selector left out, and a regression test holds that line.
+
+The run's estimate uses the same rule and the same caps, computed from `base` with `git ls-tree` because no worktree exists at planning time. The plan and the attempt select through different code paths, so a test pins them equal: an estimate that disagrees is a real defect in either direction.
+
+`eval run --json` prints `context_selection` in its plan, and the run stores it in its summary next to `edit_format`. `eval runs` lists it. `eval matrix` groups by edit format **and** context selection: `manual` keeps the plain format label so M0.8 reports still read, and an `auto` run becomes its own group such as `udiff+auto`, scored against the manual group. A run recorded before M0.9 has no key and reads as `manual`.
+
+The M0.9 experiment runs `manual` and `auto` against each other on tuning only, `middle` on the `$0` route, N=3, and opens no holdout file. Acceptance is the same rule as M0.8, with `auto` the candidate and the manual runs the baseline. Expecting a win is optimistic: a hand-written list on a curated suite is a strong baseline, and M0.8 returned a negative for the same reason. A negative is recorded here and in the CHANGELOG, and `auto` stays opt-in.
 
 ## Statistics
 
