@@ -42,6 +42,7 @@ def make(
     reason: str = "checks_failed",
     round_index: int | None = None,
     provider: frozenset[str] = frozenset(),
+    context_selection: str | None = None,
 ) -> str:
     run = create_eval_run(
         conn,
@@ -78,6 +79,8 @@ def make(
         result = "solved" if name in solved else failed
         add_eval_result(conn, run.id, name, repeat_index=0, status=result, task_id=task.id)
     summary = None if edit_format is None else {"edit_format": edit_format, "round": round_index}
+    if summary is not None and context_selection is not None:
+        summary["context_selection"] = context_selection
     finish_eval_run(conn, run.id, status, reason=None, summary=summary)  # type: ignore[arg-type]
     return run.id
 
@@ -427,3 +430,52 @@ def test_parse_since_needs_a_timezone() -> None:
         parse_since("2026-10-10T03:00:00")
     with pytest.raises(ValueError, match="not an ISO-8601 time"):
         parse_since("yesterday")
+
+
+# Context selection grouping (M0.9)
+
+
+def test_auto_and_manual_are_separate_groups(db: sqlite3.Connection, repo_id: str) -> None:
+    """An auto run must not be averaged together with the manual runs it is compared against."""
+    manual = [make(db, repo_id, "udiff", {"t1"}, context_selection="manual") for _ in range(3)]
+    auto = [make(db, repo_id, "udiff", {"t1", "t2"}, context_selection="auto") for _ in range(3)]
+    matrix = build_matrix(db, [*manual, *auto])
+    labels = [group.edit_format for group in matrix.groups]
+    assert "udiff" in labels and "udiff+auto" in labels
+
+    (decision,) = matrix.decisions
+    assert decision.edit_format == "udiff+auto"
+    # The baseline for an auto group is the manual group, so the gain is measured against it.
+    assert (decision.baseline_mean_solved, decision.mean_solved, decision.gain) == (1.0, 2.0, 1.0)
+    assert decision.verdict == "rejected"  # +1 is under the +2 rule, and no tasks were lost
+    assert decision.lost == {"t1": 0}  # t1 is solved in every auto slot, so nothing was lost
+
+
+def test_manual_label_is_unchanged_so_older_reports_still_read(
+    db: sqlite3.Connection, repo_id: str
+) -> None:
+    """The manual group keeps the plain edit-format label, as every M0.8 report has it."""
+    runs = [make(db, repo_id, "whole-file", {"t1"}) for _ in range(3)]
+    (group,) = build_matrix(db, runs).groups
+    assert group.edit_format == "whole-file"
+
+
+def test_auto_run_without_the_flag_reads_as_manual(db: sqlite3.Connection, repo_id: str) -> None:
+    """A run recorded before M0.9 has no context_selection key and must read as manual."""
+    runs = [make(db, repo_id, "udiff", {"t1"}) for _ in range(3)]
+    assert all((run.summary or {}).get("context_selection") is None for run in list_eval_runs(db))
+    (group,) = build_matrix(db, runs).groups
+    assert group.edit_format == "udiff"
+    assert all(run.context_selection == "manual" for run in group.runs)
+
+
+def test_auto_and_manual_runs_side_by_side_do_not_mix(db: sqlite3.Connection, repo_id: str) -> None:
+    """Each group holds only its own runs, and each is scored against its own slots."""
+    manual = [make(db, repo_id, "udiff", {"t1"}) for _ in range(3)]
+    auto = [make(db, repo_id, "udiff", {"t1", "t2"}, context_selection="auto") for _ in range(3)]
+    matrix = build_matrix(db, [*manual, *auto])
+    groups = {group.edit_format: group for group in matrix.groups}
+    assert all(run.context_selection == "manual" for run in groups["udiff"].runs)
+    assert all(run.context_selection == "auto" for run in groups["udiff+auto"].runs)
+    assert groups["udiff"].mean_solved == 1.0
+    assert groups["udiff+auto"].mean_solved == 2.0

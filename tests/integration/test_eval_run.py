@@ -401,4 +401,8 @@ def test_edit_format_is_stored_on_completed_and_aborted_runs(h: RunHarness) -> N
     assert done.status == "completed" and done.summary is not None
     assert done.summary["edit_format"] == "udiff"
     assert aborted.status == "aborted"
-    assert aborted.summary == {"edit_format": "search-replace", "round": 2}
+    assert aborted.summary == {
+        "edit_format": "search-replace",
+        "context_selection": "manual",
+        "round": 2,
+    }

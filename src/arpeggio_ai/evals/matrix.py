@@ -74,6 +74,7 @@ class MatrixRun:
     failures: dict[str, int] = field(default_factory=dict)
     near_misses: int = 0
     flagged: list[str] = field(default_factory=list)  # "task (NN%)"
+    context_selection: str = "manual"  # M0.9
 
     @property
     def complete(self) -> bool:
@@ -144,6 +145,11 @@ class Matrix:
 
 def edit_format_of(run: EvalRun) -> str:
     return str((run.summary or {}).get("edit_format", BASELINE))
+
+
+def context_selection_of(run: EvalRun) -> str:
+    """How the run chose context (M0.9). Runs predating the flag are ``manual``."""
+    return str((run.summary or {}).get("context_selection", "manual"))
 
 
 def round_of(run: EvalRun) -> int | None:
@@ -261,10 +267,15 @@ def load_run(conn: sqlite3.Connection, run: EvalRun) -> MatrixRun:
             if shrink > SHRINK_FLAG * 100:
                 flagged.append(f"{result.eval_task} ({shrink}%)")
     common = (run.id, edit_format_of(run), round_of(run), run.status, run.started_at)
+    selection = context_selection_of(run)
     if run.status != "completed":
-        return MatrixRun(*common, dict.fromkeys(cells, "E"), None, provider)
+        return MatrixRun(
+            *common, dict.fromkeys(cells, "E"), None, provider, context_selection=selection
+        )
     solved = sum(cell == "1" for cell in cells.values())
-    return MatrixRun(*common, cells, solved, provider, failures, near, flagged)
+    return MatrixRun(
+        *common, cells, solved, provider, failures, near, flagged, context_selection=selection
+    )
 
 
 def _order(run: MatrixRun) -> tuple[str, str]:
@@ -280,6 +291,17 @@ def _choose(runs: list[MatrixRun]) -> MatrixRun:
     clean = [run for run in ordered if run.complete and run.provider_errors == 0]
     done = [run for run in ordered if run.complete]
     return (clean or done or [ordered[-1]])[0]
+
+
+def group_key(run: MatrixRun) -> str:
+    """The group label: the edit format, and the context selection when it is not ``manual``.
+
+    Keeping ``manual`` implicit means M0.8's matrices and every report written before M0.9 keep
+    their labels; an ``auto`` run is a visibly different group rather than a silent mixing.
+    """
+    if run.context_selection == "manual":
+        return run.edit_format
+    return f"{run.edit_format}+{run.context_selection}"
 
 
 def _group(edit_format: str, runs: list[MatrixRun], tasks: list[str], expect: int) -> Group:
@@ -367,11 +389,11 @@ def build_matrix(
     runs = select_runs(conn, run_ids)
     shared = _check_consistent(runs)
     loaded = [load_run(conn, run) for run in runs]
-    order: list[str] = [f for f in EDIT_FORMATS if any(r.edit_format == f for r in loaded)]
-    order += sorted({r.edit_format for r in loaded} - set(order))
+    keys: list[str] = [f for f in EDIT_FORMATS if any(group_key(r) == f for r in loaded)]
+    keys += sorted({group_key(r) for r in loaded} - set(keys))
     tasks = sorted({task for run in loaded for task in run.cells})
     groups = [
-        _group(f, [run for run in loaded if run.edit_format == f], tasks, expect) for f in order
+        _group(key, [run for run in loaded if group_key(run) == key], tasks, expect) for key in keys
     ]
     baseline = next((g for g in groups if g.edit_format == BASELINE), None)
     decisions: list[Decision] = []
@@ -423,7 +445,7 @@ def _labels(matrix: Matrix) -> list[str]:
 
 
 def render_markdown(matrix: Matrix) -> str:
-    lines = ["# Edit-format matrix (M0.8)", ""]
+    lines = ["# Eval matrix", ""]
     lines += [f"- {name}: `{value}`" for name, value in matrix.fields.items()]
     lines += [f"- expected runs per format: {matrix.expect}", ""]
     runs = [run for group in matrix.groups for run in group.runs]
@@ -433,8 +455,7 @@ def render_markdown(matrix: Matrix) -> str:
     for label, run in zip(labels, runs, strict=True):
         solved = "E" if run.solved is None else str(run.solved)
         lines.append(
-            f"| {label} | `{run.run_id or '-'}` | {run.status} | {solved} |"
-            f" {run.provider_errors} |"
+            f"| {label} | `{run.run_id or '-'}` | {run.status} | {solved} | {run.provider_errors} |"
         )
     lines += ["", "| format | completed runs | mean solved |", "|---|---|---|"]
     for group in matrix.groups:

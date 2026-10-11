@@ -23,22 +23,33 @@ from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from decimal import Decimal
+import logging
 from pathlib import Path
 
 from arpeggio_ai.config.models import Config, PricingWindows
 from arpeggio_ai.core.errors import ArpeggioError
 from arpeggio_ai.cost.guard import GUARD_CHARS_PER_TOKEN, prompt_overhead
-from arpeggio_ai.cost.pricing import compute_cost, estimate_tokens, price_window, round_usd, snapshot
+from arpeggio_ai.cost.pricing import (
+    compute_cost,
+    estimate_tokens,
+    price_window,
+    round_usd,
+    snapshot,
+)
 from arpeggio_ai.evals.feedback import FEEDBACK_TAIL_CHARS
 from arpeggio_ai.evals.task import EvalTask
+from arpeggio_ai.orchestrator.context import Candidate, rank
 from arpeggio_ai.orchestrator.patch import (
     CONTEXT_CAP_BYTES,
+    CONTEXT_MAX_FILES,
     EditFormat,
     build_prompt,
     system_prompt,
 )
 from arpeggio_ai.safety.worktree import WorktreeError, git
 from arpeggio_ai.verify.criteria import describe
+
+log = logging.getLogger(__name__)
 
 # Room for the failure report of an escalated attempt: header, footer, and per failing
 # criterion its line plus the output tail.
@@ -78,12 +89,59 @@ async def context_bytes(
     return min(total, CONTEXT_CAP_BYTES)
 
 
+async def selected_context_paths(
+    repo: Path,
+    base: str,
+    request: str,
+    *,
+    hidden: Collection[str],
+    env: Mapping[str, str],
+    home: Path,
+) -> list[str]:
+    """The paths ``auto`` will show for ``request``, chosen without a worktree (M0.9).
+
+    The real attempt selects inside its worktree, which does not exist yet when a run is
+    planned. This reads the same candidate list from ``base`` with ``git ls-tree`` and ranks it
+    with the same rules and the same caps, so the plan's estimate describes the attempt that
+    will actually run. A listing that fails yields no context, exactly like ``select_context``.
+    """
+    listing = await git(["ls-tree", "-r", "-z", "--long", base], cwd=repo, env=env, home=home)
+    if listing.exit_code != 0:
+        log.warning("eval.context_listing_failed", extra={"detail": listing.text().strip()[:500]})
+        return []
+    blocked = {path.casefold() for path in hidden}
+    candidates: list[Candidate] = []
+    # ``--long`` gives "<mode> <type> <object> <size>\t<path>"; the size is read here rather
+    # than stat-ing a file, so no worktree is needed.
+    for record in listing.text().split("\0"):
+        if not record or "\t" not in record:
+            continue
+        meta, path = record.split("\t", 1)
+        fields = meta.split()
+        if len(fields) < 4 or fields[1] != "blob" or not fields[3].isdigit():
+            continue
+        if path.casefold() in blocked:
+            continue
+        candidates.append(Candidate(path, int(fields[3])))
+    return rank(request, candidates, limit_bytes=CONTEXT_CAP_BYTES, max_files=CONTEXT_MAX_FILES)
+
+
 def prompt_chars(
-    task: EvalTask, context_size: int, *, escalated: bool, edit_format: EditFormat = "udiff"
+    task: EvalTask,
+    context_size: int,
+    *,
+    escalated: bool,
+    edit_format: EditFormat = "udiff",
+    context_paths: Sequence[str] | None = None,
 ) -> int:
-    """Characters of the system prompt and user message for one attempt of ``task``."""
+    """Characters of the system prompt and user message for one attempt of ``task``.
+
+    ``context_paths`` overrides the task's own list with what the selector chose (M0.9), so an
+    ``auto`` run is estimated against the prompt it will really send rather than an empty one.
+    """
     checks = [describe(criterion) for criterion in task.criteria]
-    paths = [(path, "") for path in task.context_files]
+    chosen = task.context_files if context_paths is None else context_paths
+    paths = [(path, "") for path in chosen]
     message = build_prompt(task.request, checks, paths, edit_format=edit_format)
     chars = len(system_prompt(edit_format)) + len(message) + context_size
     if escalated:
@@ -170,7 +228,9 @@ class PeakNotice:
     offpeak_at: datetime | None
 
 
-def peak_notices(configs: Sequence[tuple[Config, Collection[str]]], at: datetime) -> list[PeakNotice]:
+def peak_notices(
+    configs: Sequence[tuple[Config, Collection[str]]], at: datetime
+) -> list[PeakNotice]:
     """Providers of the given model keys that are in a peak window at ``at``."""
     seen: dict[str, PeakNotice] = {}
     for config, keys in configs:

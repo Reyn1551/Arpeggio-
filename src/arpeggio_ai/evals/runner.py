@@ -44,6 +44,7 @@ from arpeggio_ai.evals.budget import (
     SpendCap,
     context_bytes,
     prompt_chars,
+    selected_context_paths,
     worst_case_usd,
 )
 from arpeggio_ai.evals.feedback import FailedCheck, failure_report
@@ -52,7 +53,7 @@ from arpeggio_ai.evals.strategies import PlannedRoute, Strategy, plan_routes
 from arpeggio_ai.evals.suite import TaskEntry, latest_checks, run_status
 from arpeggio_ai.evals.task import EvalTask, Split
 from arpeggio_ai.orchestrator.attempts import PatchAttemptOutcome, PrepareError, run_patch_attempt
-from arpeggio_ai.orchestrator.patch import EditFormat
+from arpeggio_ai.orchestrator.patch import ContextSelection, EditFormat
 from arpeggio_ai.routing.policy import PolicyFile
 from arpeggio_ai.routing.resolve import NoAllowedRoute
 from arpeggio_ai.safety.process import ProcessError, provider_key_names, run_process, scrubbed_env
@@ -135,6 +136,7 @@ class RunPlan:
     at: datetime
     policy_source: str
     edit_format: EditFormat = "udiff"
+    context_selection: ContextSelection = "manual"  # --context-selection (M0.9)
     round_index: int | None = None  # --round of the M0.8 experiment
 
     def strategy_estimate_usd(self, strategy: Strategy) -> float:
@@ -166,6 +168,7 @@ class RunPlan:
             "split": self.split,
             "repeats": self.repeats,
             "edit_format": self.edit_format,
+            "context_selection": self.context_selection,
             "round": self.round_index,
             "planned_task_runs": self.planned,
             "estimate_usd": self.estimate_usd,
@@ -228,6 +231,7 @@ async def build_plan(
     at: datetime,
     overhead: OverheadFor = lambda provider, model: 0,
     edit_format: EditFormat = "udiff",
+    context_selection: ContextSelection = "manual",
     round_index: int | None = None,
 ) -> RunPlan:
     """Select runnable tasks and plan every strategy's routes and worst-case cost."""
@@ -235,7 +239,16 @@ async def build_plan(
         raise EvalRunError("--repeats must be >= 1")
     checks = latest_checks(evals_root)
     plan = RunPlan(
-        [], [], strategies, repeats, split, at, policy_source, edit_format, round_index
+        [],
+        [],
+        strategies,
+        repeats,
+        split,
+        at,
+        policy_source,
+        edit_format,
+        context_selection,
+        round_index,
     )
     for entry in entries:
         status = run_status(entry, evals_root, checks)
@@ -251,11 +264,26 @@ async def build_plan(
             plan.skipped.append(SkippedTask(entry.id, entry.split, "config_error", str(error)))
             continue
         env = env_for(config)
+        hidden = hidden_paths(task)
+        if context_selection == "auto":
+            # M0.9: the estimate must describe the prompt the attempt will really send, so the
+            # selection is made here too, from ``base`` rather than a worktree that does not
+            # exist yet.
+            context_files = await selected_context_paths(
+                Path(task.repo.path),
+                task.repo.base,
+                task.request,
+                hidden=hidden,
+                env=env,
+                home=home,
+            )
+        else:
+            context_files = list(task.context_files)
         size = await context_bytes(
             Path(task.repo.path),
             task.repo.base,
-            task.context_files,
-            hidden=hidden_paths(task),
+            context_files,
+            hidden=hidden,
             env=env,
             home=home,
         )
@@ -274,7 +302,11 @@ async def build_plan(
                         config,
                         route.model,
                         chars=prompt_chars(
-                            task, size, escalated=step > 0, edit_format=edit_format
+                            task,
+                            size,
+                            escalated=step > 0,
+                            edit_format=edit_format,
+                            context_paths=context_files,
                         ),
                         max_tokens=config.evals.max_tokens,
                         at=at,
@@ -393,7 +425,12 @@ class EvalRunner:
                         if self.cap.stopped:
                             break
                         await self._run_one(
-                            runs[strategy], strategy, task_plan, repeat, plan.edit_format
+                            runs[strategy],
+                            strategy,
+                            task_plan,
+                            repeat,
+                            plan.edit_format,
+                            plan.context_selection,
                         )
         except BaseException as error:
             for run in runs.values():
@@ -402,7 +439,11 @@ class EvalRunner:
                     run.id,
                     "aborted",
                     reason=type(error).__name__,
-                    summary={"edit_format": plan.edit_format, "round": plan.round_index},
+                    summary={
+                        "edit_format": plan.edit_format,
+                        "context_selection": plan.context_selection,
+                        "round": plan.round_index,
+                    },
                 )
             raise
         status: EvalRunStatus = "partial" if self.cap.stopped else "completed"
@@ -421,6 +462,7 @@ class EvalRunner:
                 summary={
                     "spent_usd": round(self.cap.spent_usd, 8),
                     "edit_format": plan.edit_format,
+                    "context_selection": plan.context_selection,
                     "round": plan.round_index,
                 },
             )
@@ -488,6 +530,7 @@ class EvalRunner:
         plan: TaskPlan,
         repeat: int,
         edit_format: EditFormat = "udiff",
+        context_selection: ContextSelection = "manual",
     ) -> None:
         task, config = plan.task, plan.config
         strategy_plan = plan.strategies[strategy]
@@ -558,11 +601,16 @@ class EvalRunner:
                 max_tokens=config.evals.max_tokens,
                 context_files=task.context_files,
                 eval_task=task,
-                route_reason={**route.reason, "edit_format": edit_format},
+                route_reason={
+                    **route.reason,
+                    "edit_format": edit_format,
+                    "context_selection": context_selection,
+                },
                 feedback=feedback,
                 prepare=self._prepare(task, env, db_task.id),
                 base=base,
                 edit_format=edit_format,
+                context_selection=context_selection,
             )
             attempts += 1
             self.cap.add(task_cost_usd(self.conn, db_task.id) - before)
@@ -582,7 +630,11 @@ class EvalRunner:
             )
         counterfactual = counterfactual_usd(
             config,
-            [s for a in list_task_attempts(self.conn, db_task.id) for s in list_steps(self.conn, a.id)],
+            [
+                s
+                for a in list_task_attempts(self.conn, db_task.id)
+                for s in list_steps(self.conn, a.id)
+            ],
         )
         set_counterfactual(self.conn, db_task.id, counterfactual)
         add_eval_result(
