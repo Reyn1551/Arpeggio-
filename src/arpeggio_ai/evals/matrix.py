@@ -445,7 +445,7 @@ def _labels(matrix: Matrix) -> list[str]:
 
 
 def render_markdown(matrix: Matrix) -> str:
-    lines = ["# Edit-format matrix (M0.8)", ""]
+    lines = ["# Eval matrix", ""]
     lines += [f"- {name}: `{value}`" for name, value in matrix.fields.items()]
     lines += [f"- expected runs per format: {matrix.expect}", ""]
     runs = [run for group in matrix.groups for run in group.runs]

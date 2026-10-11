@@ -109,7 +109,7 @@ class Candidate:
 
 @dataclass(frozen=True, slots=True)
 class Scored:
-    """A candidate with the score that ranked it, kept for logging and tests."""
+    """A candidate with the score that ranked it, for deterministic sorting."""
 
     path: str
     score: float
