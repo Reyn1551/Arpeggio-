@@ -17,7 +17,7 @@ Add a deterministic, rule-based context selector (`orchestrator.context`) and le
 
 `rank(request, candidates, *, limit_bytes, max_files)` scores each tracked file by name overlap with the request and returns the highest-scoring paths that fit, with no model call, no network and no randomness. Weights favour a basename named exactly in the request (100), then a basename mentioned (40), a stem (25), a directory (12), a path (8) and an uncommon extension (4), and penalise depth, vendor trees and test files. A request naming nothing selects nothing, rather than guessing.
 
-The selector runs over `git ls-files` in the attempt's worktree, so candidates are exactly the files that exist at the base commit. Caps are shared with the prompt path: `CONTEXT_CAP_BYTES` (100 KB) and `CONTEXT_MAX_FILES` (8).
+The selector runs over `git ls-files` in the attempt's worktree, so candidates are exactly the files that exist at the base commit. Caps are shared with the prompt path: `CONTEXT_CAP_BYTES` (100 KB) and `CONTEXT_MAX_FILES` (8). Paths `read_context` always refuses (secret file patterns such as `.env*` or `secrets.*`, anything under `.git`) are not candidates, so they never take a slot or count against the byte cap, at planning time or in the worktree.
 
 **Selection is not authorisation.** The selector only decides what is *shown*. A file it did not choose is not thereby forbidden: `patch_unknown_path` continues to mean "absent from the base commit", and the worktree, the secret scanner, the hidden-test guard and the approval gate are unchanged. This is the central safety property of the change and is covered by a regression test.
 

@@ -154,3 +154,21 @@ def test_prompt_chars_uses_the_selected_paths_not_the_task_list(repo: Path) -> N
     expected = len(build_prompt(REQUEST, ["src/calc/ops.py exists"], [(p, "") for p in chosen]))
     manual = len(build_prompt(REQUEST, ["src/calc/ops.py exists"], []))
     assert with_selection - empty == expected - manual
+
+
+def test_secret_files_are_never_selected_on_either_path(tmp_path: Path) -> None:
+    """A tracked secret file named by the request is not chosen: read_context would drop it,
+    so choosing it only wastes a slot and the byte budget, and the estimate would count it."""
+    files = dict(FILES)
+    files[".env"] = "TOKEN=placeholder\n"
+    files["deploy/secrets.toml"] = "token = 'placeholder'\n"
+    repo = make_repo(tmp_path / "repo", files)
+    request = "Load .env and deploy/secrets.toml in src/calc/ops.py before calc.add runs."
+    planned = asyncio.run(
+        selected_context_paths(repo, _base(repo), request, hidden=frozenset(), env=ENV, home=repo)
+    )
+    in_worktree = asyncio.run(select_context(repo, request, env=ENV, home=repo))
+    assert planned == in_worktree
+    assert "src/calc/ops.py" in planned
+    assert ".env" not in planned
+    assert "deploy/secrets.toml" not in planned

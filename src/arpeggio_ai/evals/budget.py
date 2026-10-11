@@ -44,6 +44,7 @@ from arpeggio_ai.orchestrator.patch import (
     CONTEXT_MAX_FILES,
     EditFormat,
     build_prompt,
+    selectable,
     system_prompt,
 )
 from arpeggio_ai.safety.worktree import WorktreeError, git
@@ -120,7 +121,7 @@ async def selected_context_paths(
         fields = meta.split()
         if len(fields) < 4 or fields[1] != "blob" or not fields[3].isdigit():
             continue
-        if path.casefold() in blocked:
+        if path.casefold() in blocked or not selectable(path):
             continue
         candidates.append(Candidate(path, int(fields[3])))
     return rank(request, candidates, limit_bytes=CONTEXT_CAP_BYTES, max_files=CONTEXT_MAX_FILES)

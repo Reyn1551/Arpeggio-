@@ -693,6 +693,22 @@ async def commit_attempt(
     return sha
 
 
+def selectable(path: str) -> bool:
+    """Whether automatic selection may consider ``path`` (M0.9).
+
+    The worktree-free half of ``read_context``'s refusals: a path it would always skip (a
+    secret file pattern, ``.git``, an unsafe relative path) is never a candidate, so it cannot
+    take a slot or count against the byte cap in the selection or in the run's estimate.
+    """
+    if path.startswith('"') or relative_path_problem(path) is not None:
+        return False
+    parts = path.split("/")
+    if any(part.lower() == ".git" for part in parts):
+        return False
+    name = parts[-1].lower()
+    return not any(fnmatch.fnmatch(name, pattern) for pattern in SECRET_PATTERNS)
+
+
 async def select_context(
     worktree: Path,
     request: str,
@@ -722,7 +738,7 @@ async def select_context(
     blocked = {path.casefold() for path in hidden}
     candidates: list[Candidate] = []
     for path in listing.text().split("\0"):
-        if not path or path.casefold() in blocked:
+        if not path or path.casefold() in blocked or not selectable(path):
             continue
         target = worktree / path
         try:
