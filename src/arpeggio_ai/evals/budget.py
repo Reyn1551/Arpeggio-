@@ -74,12 +74,15 @@ async def context_bytes(
 ) -> int:
     """Total size of the context files at ``base``, capped like ``read_context``.
 
-    Hidden test paths are never looked at. Missing files count 0.
+    Hidden test paths are never looked at. A path ``read_context`` would always refuse (a
+    secret file pattern, ``.git``, an unsafe relative path) counts 0 through the shared
+    ``selectable`` predicate, so the estimate describes the prompt that really runs.
+    Missing files count 0.
     """
     blocked = {path.casefold() for path in hidden}
     total = 0
     for path in paths:
-        if path.casefold() in blocked:
+        if path.casefold() in blocked or not selectable(path):
             continue
         try:
             result = await git(["cat-file", "-s", f"{base}:{path}"], cwd=repo, env=env, home=home)

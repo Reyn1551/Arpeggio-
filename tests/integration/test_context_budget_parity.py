@@ -13,7 +13,7 @@ from pathlib import Path
 import pytest
 from gitrepo import FILES, make_repo, run_git
 
-from arpeggio_ai.evals.budget import prompt_chars, selected_context_paths
+from arpeggio_ai.evals.budget import context_bytes, prompt_chars, selected_context_paths
 from arpeggio_ai.evals.task import EvalTask
 from arpeggio_ai.orchestrator.patch import (
     CONTEXT_CAP_BYTES,
@@ -172,3 +172,24 @@ def test_secret_files_are_never_selected_on_either_path(tmp_path: Path) -> None:
     assert "src/calc/ops.py" in planned
     assert ".env" not in planned
     assert "deploy/secrets.toml" not in planned
+
+
+def test_context_bytes_skips_files_read_context_would_refuse(tmp_path: Path) -> None:
+    """The manual estimate counts exactly what the attempt will read.
+
+    ``context_bytes`` prices a hand-written ``context_files`` list. A tracked secret in
+    that list is refused by ``read_context`` at runtime, so counting its bytes prices a
+    prompt the attempt never sends — the conservative direction of the same defect the
+    ``auto`` paths fixed with ``selectable``.
+    """
+    files = dict(FILES)
+    files[".env"] = "TOKEN=placeholder\n"
+    repo = make_repo(tmp_path / "repo", files)
+    base = _base(repo)
+    paths = ["src/calc/ops.py", ".env"]
+    sized = asyncio.run(context_bytes(repo, base, paths, hidden=frozenset(), env=ENV, home=repo))
+    without_secret = asyncio.run(
+        context_bytes(repo, base, ["src/calc/ops.py"], hidden=frozenset(), env=ENV, home=repo)
+    )
+    assert without_secret > 0, "the normal file must contribute its bytes"
+    assert sized == without_secret
