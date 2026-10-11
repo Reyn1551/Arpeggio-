@@ -392,13 +392,27 @@ def test_runs_are_reconciled_from_the_database(
     other.write_bytes((changed + OPT_IN).encode("utf-8"))  # a value, not a comment: new hash
     since = "2026-06-01T00:00:00.000Z"
     first = data(invoke(*RUN, "--round", "1", "--json"))
-    second = data(invoke(*RUN, "--round", "2", "--edit-format", "whole-file", "--json"))
+    second = data(
+        invoke(
+            *RUN,
+            "--round",
+            "2",
+            "--edit-format",
+            "whole-file",
+            "--context-selection",
+            "auto",
+            "--json",
+        )
+    )
     data(invoke(*RUN, "--config", str(tmp_path / "other.toml"), "--json"))
     args = ["--strategy", "middle", "--git-sha", first["git_sha"]]
     args += ["--config-hash", first["config_hash"], "--since", since, "--json"]
     rows = data(invoke("eval", "runs", *args))["runs"]
     assert [r["id"] for r in rows] == [first["runs"]["middle"], second["runs"]["middle"]]
-    assert [(r["edit_format"], r["round"]) for r in rows] == [("udiff", 1), ("whole-file", 2)]
+    assert [(r["edit_format"], r["context_selection"], r["round"]) for r in rows] == [
+        ("udiff", "manual", 1),
+        ("whole-file", "auto", 2),
+    ]
     assert {r["config_hash"] for r in rows} == {first["config_hash"]}
     everything = data(invoke("eval", "runs", "--json"))["runs"]
     assert len(everything) == 4

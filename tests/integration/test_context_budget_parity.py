@@ -13,7 +13,7 @@ from pathlib import Path
 import pytest
 from gitrepo import FILES, make_repo, run_git
 
-from arpeggio_ai.evals.budget import prompt_chars, selected_context_paths
+from arpeggio_ai.evals.budget import context_bytes, prompt_chars, selected_context_paths
 from arpeggio_ai.evals.task import EvalTask
 from arpeggio_ai.orchestrator.patch import (
     CONTEXT_CAP_BYTES,
@@ -154,3 +154,44 @@ def test_prompt_chars_uses_the_selected_paths_not_the_task_list(repo: Path) -> N
     expected = len(build_prompt(REQUEST, ["src/calc/ops.py exists"], [(p, "") for p in chosen]))
     manual = len(build_prompt(REQUEST, ["src/calc/ops.py exists"], []))
     assert with_selection - empty == expected - manual
+
+
+def test_secret_files_are_never_selected_on_either_path(tmp_path: Path) -> None:
+    """A tracked secret file named by the request is not chosen: read_context would drop it,
+    so choosing it only wastes a slot and the byte budget, and the estimate would count it."""
+    files = dict(FILES)
+    files[".env"] = "TOKEN=placeholder\n"
+    files["deploy/secrets.toml"] = "token = 'placeholder'\n"
+    repo = make_repo(tmp_path / "repo", files)
+    request = "Load .env and deploy/secrets.toml in src/calc/ops.py before calc.add runs."
+    planned = asyncio.run(
+        selected_context_paths(repo, _base(repo), request, hidden=frozenset(), env=ENV, home=repo)
+    )
+    in_worktree = asyncio.run(select_context(repo, request, env=ENV, home=repo))
+    assert planned == in_worktree
+    assert "src/calc/ops.py" in planned
+    assert ".env" not in planned
+    assert "deploy/secrets.toml" not in planned
+
+
+def test_context_bytes_skips_files_read_context_would_refuse(tmp_path: Path) -> None:
+    """Refused paths count 0 in the manual estimate.
+
+    ``context_bytes`` prices a hand-written ``context_files`` list. A tracked secret in
+    that list is refused by ``read_context`` at runtime, so counting its bytes prices a
+    prompt the attempt never sends — the conservative direction of the same defect the
+    ``auto`` paths fixed with ``selectable``. Other unreadable entries (a non-UTF-8 blob,
+    a directory) still count their bytes, so the estimate stays an upper bound there;
+    those come from the author's own listing, not the selector.
+    """
+    files = dict(FILES)
+    files[".env"] = "TOKEN=placeholder\n"
+    repo = make_repo(tmp_path / "repo", files)
+    base = _base(repo)
+    paths = ["src/calc/ops.py", ".env"]
+    sized = asyncio.run(context_bytes(repo, base, paths, hidden=frozenset(), env=ENV, home=repo))
+    without_secret = asyncio.run(
+        context_bytes(repo, base, ["src/calc/ops.py"], hidden=frozenset(), env=ENV, home=repo)
+    )
+    assert without_secret > 0, "the normal file must contribute its bytes"
+    assert sized == without_secret
