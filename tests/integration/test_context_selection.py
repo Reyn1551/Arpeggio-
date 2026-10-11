@@ -263,8 +263,11 @@ diff --git a/tools/release/uploader.py b/tools/release/uploader.py
         outcome = built.run(provider, context_selection="auto")
         shown = built.prompt_files()
         assert "tools/release/uploader.py" not in shown, "the selector must have left it out"
-        # Not shown, yet still a real file at the base: it must not be "unknown".
-        assert outcome.failure_reason != "patch_unknown_path"
+        # Not shown, yet still a real file at the base: the patch applies and reaches review,
+        # which it cannot do if an unshown path were treated as unknown.
+        assert outcome.failure_reason is None, outcome.failure_reason
+        assert outcome.attempt_status == "completed"
+        assert outcome.task_status == "awaiting_review"
     finally:
         built.conn.close()
 
