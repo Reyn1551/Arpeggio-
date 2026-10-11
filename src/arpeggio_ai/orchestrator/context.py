@@ -59,6 +59,11 @@ VENDOR_DIRS = frozenset(
     }
 )
 TEST_MARKERS = ("test_", "_test.", ".test.", ".spec.", "tests/", "test/", "spec/")
+# An extension is only a signal when it is distinctive. A request naming "ops.py" puts the
+# word "py" in play, and that must not score every Python file in the repository.
+COMMON_EXTENSIONS = frozenset(
+    {"py", "js", "ts", "tsx", "jsx", "json", "md", "txt", "yml", "yaml", "toml", "cfg", "ini"}
+)
 # Words too common to carry signal. Kept short and obvious on purpose.
 STOPWORDS = frozenset(
     {
@@ -145,9 +150,11 @@ def _score(request: str, path: str, words: set[str], named: set[str]) -> float:
         score += STEM_IN_REQUEST
     if any(part in words for part in parts.parts[:-1]):
         score += DIR_IN_REQUEST
-    if any(token in lowered for token in words if len(token) > 3):
+    # The file's own name must carry the match. Scoring the whole path instead would let one
+    # generic word ("calc") pull in every file of the package and dilute the prompt.
+    if stem in words:
         score += PATH_IN_REQUEST
-    if extension and extension in words:
+    if extension and extension in words and extension not in COMMON_EXTENSIONS:
         score += EXTENSION_IN_REQUEST
     score -= DEPTH_PENALTY * max(0, len(parts.parts) - 1)
     if VENDOR_DIRS & set(parts.parts):

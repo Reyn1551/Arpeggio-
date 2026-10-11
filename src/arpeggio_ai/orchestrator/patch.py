@@ -46,6 +46,7 @@ from pathlib import Path
 from typing import Literal, get_args
 
 from arpeggio_ai.core.errors import ArpeggioError
+from arpeggio_ai.orchestrator.context import Candidate, rank
 from arpeggio_ai.safety.secret_scan import MARKER as REDACTION_MARKER
 from arpeggio_ai.safety.worktree import git
 from arpeggio_ai.verify.criteria import relative_path_problem
@@ -74,6 +75,11 @@ Ending = Literal["crlf", "lf", "mixed"]
 # and only reachable through ``arpeggio eval run --edit-format`` (orchestrator/edits.py).
 EditFormat = Literal["udiff", "search-replace", "whole-file"]
 EDIT_FORMATS: tuple[EditFormat, ...] = get_args(EditFormat)
+# Where the prompt's context files come from (M0.9). ``manual`` is the task's own
+# ``context_files`` list; ``auto`` ranks the base commit's tracked files against the request.
+# Experimental like ``EditFormat``: only ``eval run --context-selection`` reaches ``auto``.
+ContextSelection = Literal["manual", "auto"]
+CONTEXT_SELECTIONS: tuple[ContextSelection, ...] = get_args(ContextSelection)
 PROMPT_FILES: dict[EditFormat, str] = {
     "udiff": "patch_system.txt",
     "search-replace": "edit_search_replace.txt",
@@ -82,6 +88,8 @@ PROMPT_FILES: dict[EditFormat, str] = {
 MAX_PATCH_BYTES = 200 * 1024
 LINE_ENDING_SHARE = 0.95
 CONTEXT_CAP_BYTES = 100 * 1024
+# Automatic context selection (M0.9): a prompt is a list of files, not a repository dump.
+CONTEXT_MAX_FILES = 8
 AUTHOR_NAME = "Arpeggio"
 AUTHOR_EMAIL = "arpeggio@localhost"
 # Default context exclusions from docs/07-SECURITY-AND-PRIVACY.md (SAF-02).
@@ -683,6 +691,48 @@ async def commit_attempt(
     sha = head.text().strip()
     log.info("patch.applied", extra={"files": len(changed), "commit": sha})
     return sha
+
+
+async def select_context(
+    worktree: Path,
+    request: str,
+    *,
+    env: Mapping[str, str],
+    home: Path,
+    cap_bytes: int = CONTEXT_CAP_BYTES,
+    max_files: int = CONTEXT_MAX_FILES,
+    hidden: Collection[str] = (),
+) -> list[str]:
+    """The paths automatically chosen for ``request`` (M0.9), best first.
+
+    The candidate list is every file tracked in the worktree (``git ls-files``), with sizes
+    read from the worktree. ``orchestrator.context.rank`` then scores them against the request
+    and stops at ``max_files`` or ``cap_bytes``.
+
+    Two guarantees matter here and both have tests. First, this *chooses*, it does not
+    *authorise*: a path left out is not forbidden, so M0.7's ``patch_unknown_path`` still means
+    "absent from the base commit" and nothing changes for a diff that touches an unlisted file.
+    Second, the caps are applied with the same numbers ``read_context`` uses, so the selection
+    can never propose a prompt that ``read_context`` would then refuse to build.
+    """
+    listing = await git(["ls-files", "-z"], cwd=worktree, env=env, home=home)
+    if listing.exit_code != 0:
+        log.warning("patch.context_listing_failed", extra={"detail": listing.text().strip()[:500]})
+        return []
+    blocked = {path.casefold() for path in hidden}
+    candidates: list[Candidate] = []
+    for path in listing.text().split("\0"):
+        if not path or path.casefold() in blocked:
+            continue
+        target = worktree / path
+        try:
+            size = target.stat().st_size
+        except OSError:
+            continue
+        candidates.append(Candidate(path, size))
+    chosen = rank(request, candidates, limit_bytes=cap_bytes, max_files=max_files)
+    log.info("patch.context_selected", extra={"candidates": len(candidates), "chosen": len(chosen)})
+    return chosen
 
 
 def read_context(

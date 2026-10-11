@@ -35,6 +35,7 @@ from arpeggio_ai.evals.hidden import hidden_paths
 from arpeggio_ai.evals.task import EvalTask
 from arpeggio_ai.orchestrator.edits import EditPlan, apply_edits
 from arpeggio_ai.orchestrator.patch import (
+    ContextSelection,
     EditFormat,
     LineEndingPlan,
     PatchError,
@@ -42,6 +43,7 @@ from arpeggio_ai.orchestrator.patch import (
     build_prompt,
     extract_patch,
     read_context,
+    select_context,
     system_prompt,
     truncation_reason,
 )
@@ -338,6 +340,7 @@ async def run_patch_attempt(
     prepare: Prepare | None = None,
     base: str | None = None,
     edit_format: EditFormat = "udiff",
+    context_selection: ContextSelection = "manual",
 ) -> PatchAttemptOutcome:
     """Run one patch attempt end to end and set the attempt and task status.
 
@@ -366,6 +369,12 @@ async def run_patch_attempt(
     applies it with ``orchestrator.edits``. A reply whose ``finish_reason`` is not ``stop``
     is then ``output_truncated`` before it is parsed, and ``patch.diff`` holds the diff git
     computes from the commit, not anything the model wrote.
+
+    ``context_selection`` ``auto`` (M0.9, experimental) ignores ``context_files`` and picks
+    the context with ``orchestrator.context.rank`` over the worktree's tracked files. It
+    changes only which files are *shown*: the worktree, the secret scanner, the hidden-test
+    guard and the ``patch_unknown_path`` rule are all unchanged, so a diff may still touch a
+    file the selector did not choose.
     """
     task = get_task(conn, task_id)
     if task is None:
@@ -420,6 +429,11 @@ async def run_patch_attempt(
         set_task_status(conn, task_id, "running")
 
         checks = [describe_criterion(row.parsed()) for row in criteria]
+        if context_selection == "auto":
+            # M0.9: choose from the base commit's tracked files instead of a hand-written list.
+            context_files = await select_context(
+                tree.path, task.request, env=env, home=home, hidden=hidden
+            )
         request, context_texts, redactions = _scan_prompt_parts(
             scanner, task.request, read_context(tree.path, context_files, hidden=hidden)
         )
