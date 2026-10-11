@@ -283,7 +283,7 @@ The run's estimate uses the same rule and the same caps, computed from `base` wi
 
 `eval run --json` prints `context_selection` in its plan, and the run stores it in its summary next to `edit_format`. `eval runs` lists it. `eval matrix` groups by edit format **and** context selection: `manual` keeps the plain format label so M0.8 reports still read, and an `auto` run becomes its own group such as `udiff+auto`, scored against the manual group. A run recorded before M0.9 has no key and reads as `manual`.
 
-The M0.9 experiment runs `manual` and `auto` against each other on tuning only, `middle` on the `$0` route, N=3, and opens no holdout file. Acceptance is the same rule as M0.8, with `auto` the candidate and the manual runs the baseline. Expecting a win is optimistic: a hand-written list on a curated suite is a strong baseline, and M0.8 returned a negative for the same reason. A negative is recorded here and in the CHANGELOG, and `auto` stays opt-in.
+The M0.9 experiment runs `manual` and `auto` against each other on tuning only, `middle` on the `$0` route, N=3, and opens no holdout file. Running the experiment also needs the SAF-07 provider opt-in (`allow_training_providers`, see above): without it every route skips with `no_allowed_route` and the matrix has no solved cells to compare, which a `--dry-run` reveals before any money is spent. Acceptance is the same rule as M0.8, with `auto` the candidate and the manual runs the baseline. Expecting a win is optimistic: a hand-written list on a curated suite is a strong baseline, and M0.8 returned a negative for the same reason. A negative is recorded here and in the CHANGELOG, and `auto` stays opt-in.
 
 ## Statistics
 
