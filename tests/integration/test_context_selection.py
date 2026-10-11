@@ -270,7 +270,11 @@ diff --git a/tools/release/uploader.py b/tools/release/uploader.py
 
 
 def test_auto_selection_still_reports_a_genuinely_unknown_path(harness: Harness) -> None:
-    """A path absent from the base commit is still ``patch_unknown_path`` under auto."""
+    """A path absent from the base commit is still ``patch_unknown_path`` under auto.
+
+    The reason must be exactly this one. Accepting ``patch_does_not_apply`` as well would let
+    the test pass with the unknown-path guard removed, which is the guard it exists to protect.
+    """
     diff = """```diff
 diff --git a/src/calc/does_not_exist.py b/src/calc/does_not_exist.py
 --- a/src/calc/does_not_exist.py
@@ -282,7 +286,7 @@ diff --git a/src/calc/does_not_exist.py b/src/calc/does_not_exist.py
 ```"""
     provider = FakeProvider(ok(f"Fixed.\n\n{diff}\n"))
     outcome = harness.run(provider, context_selection="auto")
-    assert outcome.failure_reason in ("patch_unknown_path", "patch_does_not_apply")
+    assert outcome.failure_reason == "patch_unknown_path"
 
 
 def test_auto_selection_records_the_files_it_chose(harness: Harness) -> None:
