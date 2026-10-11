@@ -42,6 +42,7 @@ from arpeggio_ai.evals.budget import (
 from arpeggio_ai.evals.matrix import (
     Matrix,
     build_matrix,
+    context_selection_of,
     edit_format_of,
     matching_runs,
     parse_since,
@@ -809,6 +810,7 @@ def runs_command(
                         "git_sha": run.git_sha,
                         "config_hash": run.config_hash,
                         "edit_format": edit_format_of(run),
+                        "context_selection": context_selection_of(run),
                         "round": round_of(run),
                         "started_at": run.started_at,
                         "task_runs": len(done),
