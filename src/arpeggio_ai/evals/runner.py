@@ -439,7 +439,11 @@ class EvalRunner:
                     run.id,
                     "aborted",
                     reason=type(error).__name__,
-                    summary={"edit_format": plan.edit_format, "round": plan.round_index},
+                    summary={
+                        "edit_format": plan.edit_format,
+                        "context_selection": plan.context_selection,
+                        "round": plan.round_index,
+                    },
                 )
             raise
         status: EvalRunStatus = "partial" if self.cap.stopped else "completed"
@@ -458,6 +462,7 @@ class EvalRunner:
                 summary={
                     "spent_usd": round(self.cap.spent_usd, 8),
                     "edit_format": plan.edit_format,
+                    "context_selection": plan.context_selection,
                     "round": plan.round_index,
                 },
             )
@@ -625,7 +630,11 @@ class EvalRunner:
             )
         counterfactual = counterfactual_usd(
             config,
-            [s for a in list_task_attempts(self.conn, db_task.id) for s in list_steps(self.conn, a.id)],
+            [
+                s
+                for a in list_task_attempts(self.conn, db_task.id)
+                for s in list_steps(self.conn, a.id)
+            ],
         )
         set_counterfactual(self.conn, db_task.id, counterfactual)
         add_eval_result(

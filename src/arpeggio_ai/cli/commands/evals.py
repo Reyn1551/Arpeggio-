@@ -421,6 +421,14 @@ def run_command_(
             help="Experimental (M0.8): how the model writes its change. udiff is EXE-08.",
         ),
     ] = "udiff",
+    context_selection: Annotated[
+        Literal["manual", "auto"],
+        typer.Option(
+            "--context-selection",
+            help="Experimental (M0.9): manual uses each task's context_files; auto ranks the"
+            " base commit's tracked files against the request.",
+        ),
+    ] = "manual",
     round_index: Annotated[
         int | None,
         typer.Option("--round", min=1, help="Experiment round stored on the run (M0.8)."),
@@ -462,6 +470,7 @@ def run_command_(
                     at=at,
                     overhead=overhead,
                     edit_format=edit_format,
+                    context_selection=context_selection,
                     round_index=round_index,
                 )
             )
@@ -543,7 +552,8 @@ def run_command_(
     out.print(
         f"profile {summary['profile']}, split {plan['split']}, strategies"
         f" {', '.join(plan['strategies'])}, repeats {plan['repeats']},"
-        f" edit format {plan['edit_format']}:"
+        f" edit format {plan['edit_format']},"
+        f" context selection {plan['context_selection']}:"
         f" {plan['planned_task_runs']} task runs per strategy",
         markup=False,
     )
@@ -707,7 +717,7 @@ def matrix_command(
     ] = None,
     json_flag: JsonOption = False,
 ) -> None:
-    """Solved per run and edit format, and the M0.8 decision against the udiff runs."""
+    """Solved per run and edit format, and the M0.9 decision against the manual runs."""
     as_json = json_mode(ctx, json_flag)
 
     def action() -> tuple[Matrix, Path]:
