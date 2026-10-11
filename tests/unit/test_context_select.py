@@ -61,12 +61,142 @@ def test_hidden_style_paths_are_not_special_cased_here() -> None:
 
 
 def test_vendor_trees_rank_below_real_sources() -> None:
+    """A vendor directory alone is enough to demote a file that would otherwise win.
+
+    ``node_modules/index.js`` and ``lib/x/index.js`` share the basename, so both get the exact
+    and basename bonuses; the vendor path is one level shallower and would come first on depth,
+    but the 30-point vendor penalty keeps the real source ahead. Measured: 142.50 against 172.00
+    with the penalty, and 172.50 against 172.00 without it — so this test fails if it is removed.
+    """
     candidates = [
-        Candidate("node_modules/pkg/index.js", 10),
-        Candidate("src/app/index.js", 10),
+        Candidate("node_modules/index.js", 10),
+        Candidate("lib/x/index.js", 10),
     ]
-    chosen = rank("Update index.js in app", candidates, limit_bytes=10_000, max_files=5)
-    assert chosen[0] == "src/app/index.js"
+    chosen = rank("Update index.js", candidates, limit_bytes=10_000, max_files=5)
+    assert chosen == ["lib/x/index.js", "node_modules/index.js"]
+
+
+def test_a_directory_word_surfaces_files_under_that_directory() -> None:
+    """Naming a directory is what makes a file under it selectable at all.
+
+    Measured for the request ``fix src helper``: ``src/ops.py`` scores 11.50 (the 12-point
+    directory bonus) while ``lib/ops.py`` scores -0.50 and is dropped. Dropping the bonus would
+    send ``src/ops.py`` negative too, so this fails if the directory rule is removed.
+    """
+    candidates = [Candidate("lib/ops.py", 10), Candidate("src/ops.py", 10)]
+    assert rank("fix src helper", candidates, limit_bytes=10_000, max_files=5) == ["src/ops.py"]
+
+
+def test_a_shallower_file_is_preferred_over_a_deeper_copy() -> None:
+    """When all else is equal, the fewer directories a file sits in, the sooner it is shown.
+
+    ``ops.py`` and ``deep/nested/ops.py`` score identically except for the depth penalty; the
+    root-level file must come first regardless of input order.
+    """
+    candidates = [Candidate("deep/nested/ops.py", 10), Candidate("ops.py", 10)]
+    assert rank("Fix ops", candidates, limit_bytes=10_000, max_files=5) == [
+        "ops.py",
+        "deep/nested/ops.py",
+    ]
+    assert rank("Fix ops", list(reversed(candidates)), limit_bytes=10_000, max_files=5) == [
+        "ops.py",
+        "deep/nested/ops.py",
+    ]
+
+
+def test_test_files_rank_below_the_source_they_cover() -> None:
+    """A test-marked path loses to the module it covers, on the penalty alone.
+
+    Measured for the request ``ops``: ``src/test_ops.py`` scores -6.50 and ``src/ops.py`` 32.50,
+    a gap of exactly the 6-point test penalty. Both the bare ``test_ops.py`` (-6.00) and the
+    in-tree ``src/test_ops.py`` (-6.50) are non-positive, so ``rank`` drops them.
+    """
+    for path in ("test_ops.py", "src/test_ops.py"):
+        assert rank("ops", [Candidate(path, 10)], limit_bytes=10_000, max_files=5) == [], path
+    both = [Candidate("src/test_ops.py", 10), Candidate("src/ops.py", 10)]
+    assert rank("ops", both, limit_bytes=10_000, max_files=5) == ["src/ops.py"]
+    # Reverse the input order: the penalty must decide, not the tie-break by path.
+    assert rank("ops", list(reversed(both)), limit_bytes=10_000, max_files=5) == ["src/ops.py"]
+
+
+def test_the_test_penalty_reorders_paths_that_all_survive() -> None:
+    """The penalty changes the order of paths that all score positively.
+
+    Measured for the request ``ops``: with the penalty ``src/t/ops.py`` (a test-marked path)
+    comes second; without it, it drops to fifth, behind ``test/ops.py`` and ``tests/ops.py``.
+    The paths all stay in the list either way, so only the order reveals the penalty — the
+    sign-based tests above cannot see this.
+    """
+    paths = ["src/t/ops.py", "test/ops.py", "tests/ops.py", "src/ops.py"]
+    chosen = rank("ops", [Candidate(p, 10) for p in paths], limit_bytes=10_000, max_files=10)
+    assert chosen == ["src/ops.py", "src/t/ops.py", "test/ops.py", "tests/ops.py"]
+
+
+def test_the_test_penalty_is_what_removes_a_weak_test_path() -> None:
+    """The penalty, not the depth term, is what separates these two paths.
+
+    Measured for the request ``ops``: ``src/test_ops.py`` scores -6.50 and is dropped, while
+    ``test/ops.py`` scores 26.50 and is kept. ``test/ops.py`` is only one character longer, so
+    depth alone cannot explain a 33-point gap; the test penalty is what does.
+    """
+    assert rank("ops", [Candidate("src/test_ops.py", 10)], limit_bytes=10_000, max_files=5) == []
+    assert rank("ops", [Candidate("test/ops.py", 10)], limit_bytes=10_000, max_files=5) == [
+        "test/ops.py"
+    ]
+    # Head to head the kept one wins, whichever order they arrive in.
+    both = [Candidate("src/test_ops.py", 10), Candidate("test/ops.py", 10)]
+    assert rank("ops", both, limit_bytes=10_000, max_files=5) == ["test/ops.py"]
+    assert rank("ops", list(reversed(both)), limit_bytes=10_000, max_files=5) == ["test/ops.py"]
+
+
+def test_the_exact_named_path_outranks_a_basename_only_match() -> None:
+    """A path the request names in full must beat one that only shares its basename.
+
+    Measured: for the request ``edit src/calc/ops.py``, ``src/calc/ops.py`` scores 184.00 and
+    ``src/ops.py`` 84.50. Drop the exact-match rule and ``src/ops.py`` is promoted to first
+    place, so the selector would show a same-named file from the wrong directory. This is the
+    rule that keeps a path-qualified request anchored to the file it actually named.
+    """
+    request = "edit src/calc/ops.py"
+    candidates = [
+        Candidate("src/ops.py", 10),
+        Candidate("src/calc/ops.py", 10),
+        Candidate("ops.py", 10),
+    ]
+    assert rank(request, candidates, limit_bytes=10_000, max_files=5)[0] == "src/calc/ops.py"
+    # Order of the candidates must not matter.
+    assert rank(request, list(reversed(candidates)), limit_bytes=10_000, max_files=5)[0] == (
+        "src/calc/ops.py"
+    )
+
+
+def test_an_exactly_named_basename_outranks_a_deeper_copy() -> None:
+    """Naming a bare basename prefers the shallow copy of it over a nested one."""
+    request = "Update README.md"
+    candidates = [Candidate("docs/README.md", 10), Candidate("README.md", 10)]
+    assert rank(request, candidates, limit_bytes=10_000, max_files=5) == [
+        "README.md",
+        "docs/README.md",
+    ]
+
+
+def test_a_stopword_stem_does_not_select_a_file() -> None:
+    """A request of filler words selects nothing, even when a file is named after one.
+
+    Measured: ``src/not.py`` scores 0.00 with the filter and 33.00 without it. ``rank`` keeps
+    only positive scores, so the filtered score selects nothing and the unfiltered one would
+    select the file — this is what the stopword list actually buys.
+    """
+    filler = "the and with not"
+    assert rank(filler, [Candidate("src/not.py", 10)], limit_bytes=10_000, max_files=5) == []
+    assert rank(filler, [Candidate("not.py", 10)], limit_bytes=10_000, max_files=5) == []
+
+
+def test_a_real_word_still_scores_when_stopwords_are_present() -> None:
+    """The stopword filter must not remove so much that a genuine match stops scoring."""
+    candidates = [Candidate("src/calc.py", 10)]
+    chosen = rank("Fix the bug in calc that we saw", candidates, limit_bytes=10_000, max_files=5)
+    assert chosen == ["src/calc.py"]
 
 
 def test_byte_cap_is_respected_and_smaller_files_still_fit() -> None:
