@@ -23,6 +23,7 @@ from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from decimal import Decimal
+import logging
 from pathlib import Path
 
 from arpeggio_ai.config.models import Config, PricingWindows
@@ -47,6 +48,8 @@ from arpeggio_ai.orchestrator.patch import (
 )
 from arpeggio_ai.safety.worktree import WorktreeError, git
 from arpeggio_ai.verify.criteria import describe
+
+log = logging.getLogger(__name__)
 
 # Room for the failure report of an escalated attempt: header, footer, and per failing
 # criterion its line plus the output tail.
@@ -104,6 +107,7 @@ async def selected_context_paths(
     """
     listing = await git(["ls-tree", "-r", "-z", "--long", base], cwd=repo, env=env, home=home)
     if listing.exit_code != 0:
+        log.warning("eval.context_listing_failed", extra={"detail": listing.text().strip()[:500]})
         return []
     blocked = {path.casefold() for path in hidden}
     candidates: list[Candidate] = []
